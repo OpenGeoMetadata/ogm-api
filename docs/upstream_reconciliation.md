@@ -13,7 +13,7 @@ upstream `backend/` subtree recorded in `config/upstream-backend-source.env`.
 | Upstream tag containing that commit | `v0.7.16` |
 | Recorded backend split | `1cf222b377be4ba1d8468fa864724542e866eb3e` |
 | Review ceiling | Upstream `0.8.11` (`4254aa3`) |
-| OGM product version | Independent; currently `0.7.0` |
+| OGM product version | Independent; currently `0.10.0` |
 
 The review ceiling is not a promise that this product becomes upstream `0.8.11`.
 OGM releases and upstream source provenance are separate concepts.
