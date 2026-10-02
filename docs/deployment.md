@@ -780,3 +780,26 @@ For deployment issues:
 3. Verify server connectivity: `kamal details`
 4. Review this documentation
 5. Check Kamal documentation: https://kamal-deploy.org/
+
+### Keep OGM harvests searchable
+
+Each repository harvest bulk-synchronizes its database records to Elasticsearch
+before reporting success. Indexing uses keyset pagination, keeps the live index
+available, removes records whose effective publication state is unpublished, and
+invalidates search/suggestion response caches after refresh. Index failures make
+the harvest fail visibly; rerunning the harvest retries synchronization.
+
+For a manual reconciliation inside the running backend container:
+
+```bash
+python /app/backend/scripts/sync_ogm_search_index.py --repo gov.usgs
+# Omit --repo to synchronize every resource already present in PostgreSQL.
+```
+
+The helper runs in a separate process because bulk enrichment preparation uses
+process-local prefetched lookups. It neither drops the live index nor deletes
+PostgreSQL records. Database rows removed entirely are outside this helper's scope.
+
+Dashboard harvested totals count repository memberships, so shared IDs can appear
+more than once. Its published total covers repository-tagged database records;
+search also includes published records without a repository tag.

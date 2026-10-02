@@ -10,6 +10,7 @@ from app.services.ogm_harvest.dumps import OGMHarvestDumpWriter
 from app.services.ogm_harvest.importer import OGMResourceImporter
 from app.services.ogm_harvest.repo_sync import OGMRepoSync
 from app.services.ogm_harvest.repository import OGMHarvestRepository
+from app.services.ogm_harvest.search_index import sync_repo_search
 from app.services.thumbnail_refresh_service import refresh_thumbnail_cache_for_changed_resources
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,15 @@ async def harvest_repo(
             ogm_run_id=run_id,
             progress_meta={"head_sha": head_sha, "repo_action": sync_result.action},
         )
+        await repo.update_harvest_run(
+            ogm_id=run_id,
+            ogm_stats_json={
+                **stats,
+                "stage": "search_index",
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            },
+        )
+        stats["search_index"] = await sync_repo_search(repo_name)
         changed_thumbnail_ids = sorted(importer.changed_thumbnail_resource_ids)
         stats["thumbnail_sources_changed"] = len(changed_thumbnail_ids)
         if changed_thumbnail_ids:
