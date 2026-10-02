@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.v1.endpoint_modules.mcp import router
+from app.identity import API_VERSION
 from app.main import app
 from tests.utils.route_helpers import route_paths
 
@@ -35,7 +36,7 @@ class TestMCPEndpoints:
 
         # Check basic service information
         assert data["name"] == "opengeometadata-api"
-        assert data["version"] == "0.7.0"
+        assert data["version"] == API_VERSION
         assert data["description"] == "OpenGeoMetadata API MCP Service"
         assert data["protocol"] == "mcp"
         assert "stdio" in data["transports"]

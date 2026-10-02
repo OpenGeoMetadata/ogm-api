@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 # Create test app
 from app.api.v1.endpoint_modules.root import router
+from app.identity import API_VERSION
 from tests.utils.route_helpers import route_by_path, route_paths
 
 app = FastAPI()
@@ -87,7 +88,7 @@ class TestRootEndpoints:
         # Check attributes
         attributes = api_info["attributes"]
         assert attributes["api"] == "OpenGeoMetadata API"
-        assert attributes["version"] == "0.7.0"
+        assert attributes["version"] == API_VERSION
         assert "description" in attributes
         assert "endpoints" in attributes
         assert isinstance(attributes["endpoints"], list)
@@ -137,7 +138,7 @@ class TestRootEndpoints:
         attributes = data["data"]["attributes"]
         version = attributes["version"]
 
-        assert version == "0.7.0"
+        assert version == API_VERSION
 
     def test_api_root_with_request_url(self):
         """Test API root with request URL in response."""
