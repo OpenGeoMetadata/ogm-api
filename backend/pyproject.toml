@@ -1,6 +1,6 @@
 [project]
 name = "opengeometadata-api"
-version = "0.7.0"
+version = "0.10.0"
 description = "Search, harvest, and delivery API for OpenGeoMetadata Aardvark records"
 requires-python = ">=3.11"
 authors = [
