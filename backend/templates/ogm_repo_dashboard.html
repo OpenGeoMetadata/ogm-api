@@ -37,8 +37,9 @@
       <p class="lede">
         This page tracks every repository discovered in the OpenGeoMetadata GitHub organization,
         whether it exposes a <code>metadata-aardvark/</code> directory, when it last changed on GitHub,
-        when this app last harvested it, and how many records are currently harvested versus published
-        through this API.
+        when this app last harvested it, and how many records were last seen in each source. Archived and disabled
+        sources retain their harvest history. Publication counts come from the database;
+        this page does not verify the live search index.
       </p>
       <p class="meta-note">Generated {{ generated_at }}. Times shown in UTC.</p>
     </section>
@@ -53,15 +54,15 @@
         <p class="summary-value">{{ summary.repos_with_aardvark_count }}</p>
       </article>
       <article class="summary-card">
-        <p class="summary-label">Nightly Enabled</p>
+        <p class="summary-label">Harvesting Enabled</p>
         <p class="summary-value">{{ summary.enabled_repo_count }}</p>
       </article>
       <article class="summary-card">
-        <p class="summary-label">Current Harvested Records</p>
+        <p class="summary-label">Unique Records in Active Sources</p>
         <p class="summary-value">{{ "{:,}".format(summary.harvested_record_count) }}</p>
       </article>
       <article class="summary-card">
-        <p class="summary-label">Published in This API</p>
+        <p class="summary-label">Published Records (Database)</p>
         <p class="summary-value">{{ "{:,}".format(summary.available_record_count) }}</p>
       </article>
       <article class="summary-card">
@@ -74,6 +75,8 @@
       <div class="monitor-table-head">
         <div>
           <h3>Repositories</h3>
+          <p class="meta-note">Per-repository counts can overlap and should not be added together.
+            “Also in active sources” describes overlapping source records, not a synchronization failure.</p>
           <p class="meta-note">JSON source: <a href="/api/v1/ogm/repos"><code>/api/v1/ogm/repos</code></a></p>
         </div>
       </div>
@@ -86,9 +89,9 @@
               <th scope="col">Last Commit</th>
               <th scope="col">Last Harvest</th>
               <th scope="col">Aardvark</th>
-              <th scope="col">Harvest Status</th>
-              <th scope="col">Harvested Records</th>
-              <th scope="col">API Visibility</th>
+              <th scope="col">Last Harvest Result</th>
+              <th scope="col">Last-Seen Source Records</th>
+              <th scope="col">Published with Source Tag (Database)</th>
             </tr>
           </thead>
           <tbody>
@@ -98,6 +101,8 @@
                 <div class="repo-cell">
                   <a href="{{ repo.ogm_github_url }}" target="_blank" rel="noreferrer">{{ repo.ogm_repo_name }}</a>
                   <p class="repo-subtitle">{{ repo.ogm_repo_full_name or repo.ogm_repo_name }}</p>
+                  <p><a href="{{ repo.ogm_search_url }}" aria-label="Search API records from {{ repo.ogm_repo_name }}">Search API</a></p>
+                  <p><span class="status-pill {{ 'status-ok' if repo.source_status == 'Active' else 'status-muted' }}">{{ repo.source_status }}</span></p>
                   <p class="repo-subtitle">
                     mode: <code>{{ repo.ogm_watch_mode or "manual" }}</code>
                     {% if repo.last_commit_sha %}
@@ -120,10 +125,12 @@
                 {% endif %}
               </td>
               <td>
-                {% if repo.ogm_has_aardvark %}
+                {% if repo.ogm_has_aardvark is sameas true %}
                 <span class="status-pill status-ok">Present</span>
-                {% else %}
+                {% elif repo.ogm_has_aardvark is sameas false %}
                 <span class="status-pill status-muted">Missing</span>
+                {% else %}
+                <span class="status-pill status-muted">Unknown</span>
                 {% endif %}
               </td>
               <td>
@@ -155,8 +162,7 @@
                   <span>{{ "{:,}".format(item.count) }} {{ item.label }}</span>{% if not loop.last %}<span> · </span>{% endif %}
                   {% endfor %}
                 </p>
-                {% elif repo.harvest_gap_count %}
-                <p class="repo-subtitle">{{ "{:,}".format(repo.harvest_gap_count) }} hidden from API</p>
+
                 {% endif %}
               </td>
             </tr>
