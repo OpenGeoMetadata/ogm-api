@@ -38,7 +38,7 @@ jobs:
           SSH_PORT: ${{ secrets.OGM_KAMAL_SSH_PORT || '22' }}
           SSH_USER: ${{ secrets.OGM_KAMAL_SSH_USER }}
         run: |
-          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" '
+          ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" '
             set -eu
 
             container="$(docker ps \
