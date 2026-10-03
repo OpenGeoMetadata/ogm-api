@@ -68,9 +68,9 @@ def test_public_ogm_repo_dashboard_renders_html_monitor():
             ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=sample_repos)
         ),
         patch.object(
-            ogm.ogm_repo,
-            "get_public_dashboard_counts",
-            AsyncMock(return_value={"active_record_count": 904, "published_record_count": 1234}),
+            ogm,
+            "get_index_status",
+            AsyncMock(return_value={"record_count": 1234, "repo_counts": {"edu.utexas": 899}}),
         ),
     ):
         response = client.get("/api/v1/ogm/repos/dashboard")
@@ -81,7 +81,9 @@ def test_public_ogm_repo_dashboard_renders_html_monitor():
     assert "edu.utexas" in response.text
     assert "OpenGeoMetadata/edu.utexas" in response.text
     assert "/api/v1/ogm/repos" in response.text
-    assert "3 unpublished" in response.text
+    assert "899" in response.text
+    assert "1,234" in response.text
+    assert "Never Harvested Here" not in response.text
     assert 'href="https://github.com/OpenGeoMetadata/edu.utexas"' in response.text
     assert 'href="/api/v1/search?ogm_repo=edu.utexas"' in response.text
 
@@ -169,57 +171,53 @@ def test_public_ogm_failures_endpoint_can_limit_to_hard_failures_only():
     )
 
 
-def test_dashboard_distinguishes_retired_sources_and_uses_global_counts():
+def test_dashboard_only_shows_indexed_sources_even_when_database_disagrees():
     repos = [
-        {
-            "ogm_repo_name": "edu.umn",
-            "ogm_enabled": True,
-            "ogm_archived": True,
-            "last_crawl_status": "success",
-            "harvested_record_count": 6332,
-            "available_record_count": 0,
-            "unpublished_record_count": 441,
-            "other_active_source_count": 5891,
-        },
-        {
-            "ogm_repo_name": "gov.usgs",
-            "ogm_enabled": False,
-            "harvested_record_count": 177789,
-            "available_record_count": 0,
-            "other_active_source_count": 177789,
-        },
+        {"ogm_repo_name": "retired", "ogm_enabled": False, "available_record_count": 100},
+        {"ogm_repo_name": "empty", "ogm_enabled": True, "available_record_count": 10},
         {
             "ogm_repo_name": "geobtaa",
             "ogm_enabled": True,
-            "harvested_record_count": 40703,
-            "available_record_count": 40703,
+            "ogm_watch_mode": "nightly",
+            "available_record_count": 1,
         },
     ]
     with (
         patch.object(ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=repos)),
         patch.object(
-            ogm.ogm_repo,
-            "get_public_dashboard_counts",
+            ogm,
+            "get_index_status",
             AsyncMock(
-                return_value={"active_record_count": 315135, "published_record_count": 318408}
+                return_value={
+                    "record_count": 318408,
+                    "repo_counts": {"geobtaa": 40703, "uncataloged": 2},
+                }
             ),
         ),
     ):
         response = client.get("/api/v1/ogm/repos/dashboard")
     assert response.status_code == 200
-    html = response.text
-    for expected in (
-        "Archived",
-        "Disabled",
-        "Active",
-        "315,135",
-        "318,408",
-        "5,891 also in active sources",
-        "177,789 also in active sources",
-        "Last Harvest Result",
-        "Published Records (Database)",
+    for expected in ("318,408", "40,703", "geobtaa", "uncataloged", "Scheduled Nightly"):
+        assert expected in response.text
+    for absent in ("retired", "Never Harvested Here", "Database", "also in active sources"):
+        assert absent not in response.text
+    assert 'href="https://github.com/OpenGeoMetadata/uncataloged"' in response.text
+
+
+def test_dashboard_reports_index_unavailable_instead_of_misleading_empty_counts():
+    with patch.object(ogm, "get_index_status", AsyncMock(side_effect=RuntimeError("offline"))):
+        response = client.get("/api/v1/ogm/repos/dashboard")
+    assert response.status_code == 503
+    assert "unavailable" in response.json()["detail"]
+
+
+def test_dashboard_empty_index():
+    with (
+        patch.object(ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=[])),
+        patch.object(
+            ogm, "get_index_status", AsyncMock(return_value={"record_count": 0, "repo_counts": {}})
+        ),
     ):
-        assert expected in html
-    assert "not yet synced" not in html
-    assert "hidden from API" not in html
-    assert "does not verify the live search index" in html
+        response = client.get("/api/v1/ogm/repos/dashboard")
+    assert response.status_code == 200
+    assert "No repositories currently have indexed records" in response.text
