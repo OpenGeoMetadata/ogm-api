@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from scripts import populate_ogm_repos
 
 
@@ -62,3 +64,39 @@ def test_repo_has_metadata_aardvark_retries_without_rejected_token(monkeypatch):
     )
     assert calls[0]["headers"]["Authorization"] == "Bearer bad-token"
     assert "Authorization" not in calls[1]["headers"]
+
+
+@pytest.mark.parametrize("script_name", ["populate_ogm_repos", "trigger_ogm_nightly_sync"])
+@pytest.mark.parametrize("extra_args", [[], ["--include-archived"]])
+def test_refresh_disables_archived_repos_and_enables_geobtaa(monkeypatch, script_name, extra_args):
+    from importlib import import_module
+
+    script = import_module(f"scripts.{script_name}")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused/test")
+    args = [script_name, *extra_args]
+    if script_name == "trigger_ogm_nightly_sync":
+        args.append("--skip-harvest")
+    monkeypatch.setattr("sys.argv", args)
+    monkeypatch.setattr(
+        script,
+        "list_org_repos",
+        lambda *a, **kw: [
+            {"name": "edu.umn", "archived": True},
+            {"name": "geobtaa", "archived": False},
+        ],
+    )
+    monkeypatch.setattr(script, "repo_has_metadata_aardvark", lambda *a: True)
+    rows = []
+
+    def capture(url, values, dry_run=False):
+        rows.extend(values)
+        return len(values), 0
+
+    monkeypatch.setattr(script, "upsert_rows", capture)
+    script.main()
+    assert [(r["ogm_repo_name"], r["ogm_enabled"]) for r in rows] == [
+        ("edu.umn", False),
+        ("geobtaa", True),
+    ]
+    assert rows[0]["ogm_watch_mode"] == "manual"
+    assert rows[0]["ogm_tags"]["ogm_archived"] is True

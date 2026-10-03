@@ -193,6 +193,13 @@ class OGMHarvestRepository:
         )
         return dict(row) if row else None
 
+    async def ensure_repo(self, ogm_repo_name: str) -> None:
+        """Create an unknown repo without overwriting existing discovery/admin settings."""
+        stmt = pg_insert(ogm_repos).values(ogm_repo_name=ogm_repo_name)
+        await database.execute(
+            stmt.on_conflict_do_nothing(index_elements=[ogm_repos.c.ogm_repo_name])
+        )
+
     async def upsert_repo(
         self,
         ogm_repo_name: str,

@@ -19,6 +19,12 @@ async def test_ogm_harvest_all_nightly_trigger_selects_scheduled_modes(monkeypat
             {"ogm_repo_name": "scheduled-repo", "ogm_enabled": True, "ogm_watch_mode": "scheduled"},
             {"ogm_repo_name": "both-repo", "ogm_enabled": True, "ogm_watch_mode": "both"},
             {"ogm_repo_name": "manual-repo", "ogm_enabled": True, "ogm_watch_mode": "manual"},
+            {
+                "ogm_repo_name": "archived-repo",
+                "ogm_enabled": True,
+                "ogm_watch_mode": "both",
+                "ogm_tags": {"ogm_archived": True},
+            },
             {"ogm_repo_name": "disabled-repo", "ogm_enabled": False, "ogm_watch_mode": "nightly"},
         ]
     )

@@ -218,3 +218,19 @@ def test_push_to_unknown_aardvark_repo_discovers_and_queues(monkeypatch):
     assert response.json()["queued"] == "edu.new"
     assert queued == [{"repo_name": "edu.new", "trigger": "push"}]
     assert FakeRepo.upserts[0]["ogm_repo_name"] == "edu.new"
+
+
+def test_repository_archived_disables_existing_repo_without_queuing(monkeypatch):
+    queued = []
+    FakeRepo.rows = {"edu.umn": {"ogm_enabled": True, "ogm_watch_mode": "both"}}
+    monkeypatch.setenv("OGM_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setattr(ogm_webhook, "OGMHarvestRepository", FakeRepo)
+    monkeypatch.setattr(ogm_webhook, "repo_has_metadata_aardvark", lambda *args: True)
+    monkeypatch.setattr(ogm_webhook.ogm_harvest_repo, "delay", lambda **kw: queued.append(kw))
+    response = _post_webhook(
+        {"action": "archived", "repository": _repo_payload("edu.umn", archived=True)}, "repository"
+    )
+    assert response.status_code == 200
+    assert FakeRepo.rows["edu.umn"]["ogm_enabled"] is False
+    assert FakeRepo.rows["edu.umn"]["ogm_tags"]["ogm_archived"] is True
+    assert queued == []

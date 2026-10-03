@@ -52,7 +52,7 @@ def main() -> None:
     parser.add_argument(
         "--include-archived",
         action="store_true",
-        help="Include archived repos when refreshing ogm_repos",
+        help="Deprecated compatibility flag; archived repos are always recorded as disabled",
     )
     parser.add_argument(
         "--skip-harvest",
@@ -69,8 +69,7 @@ def main() -> None:
 
     sync_db_url = _sync_database_url(database_url)
     repos = list_org_repos(args.org, token, per_page=args.per_page)
-    if not args.include_archived:
-        repos = [repo for repo in repos if not repo.get("archived", False)]
+    # Reconcile archived repos too, so previously enabled entries become disabled.
     if args.limit is not None:
         repos = repos[: args.limit]
 

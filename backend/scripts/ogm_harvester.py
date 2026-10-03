@@ -82,7 +82,11 @@ class OGMHarvester:
             self.logger.warning(f"OGM path does not exist: {self.ogm_path}")
             return
 
+        # Old checkouts remain on disk after GitHub repositories are archived.
+        active_repos = set(self.repositories())
         for json_file in ogm_path.rglob("*.json"):
+            if json_file.relative_to(ogm_path).parts[0] not in active_repos:
+                continue
             # Skip layers.json files
             if json_file.name == "layers.json":
                 self.logger.debug(f"skipping {json_file}; not a geoblacklight JSON document")
