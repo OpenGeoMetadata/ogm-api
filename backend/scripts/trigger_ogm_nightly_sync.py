@@ -60,7 +60,12 @@ def main() -> None:
         help="Refresh the repo catalog but do not enqueue ogm_harvest_all",
     )
     parser.add_argument("--dry-run", action="store_true", help="Do not write or enqueue anything")
+    parser.add_argument(
+        "--wait", action="store_true", help="Wait for all harvest and indexing jobs to succeed"
+    )
     args = parser.parse_args()
+    if args.wait and (args.dry_run or args.skip_harvest or args.limit is not None):
+        parser.error("--wait requires a complete, non-dry-run harvest")
 
     token = args.github_token or os.getenv("GITHUB_TOKEN")
     database_url = os.getenv("DATABASE_URL")
@@ -88,6 +93,8 @@ def main() -> None:
         try:
             has_aardvark = repo_has_metadata_aardvark(args.org, name, default_branch, token)
         except Exception as exc:
+            if args.wait:
+                raise RuntimeError(f"Repository discovery failed for {name}") from exc
             has_aardvark = False
             repo.setdefault("notes", str(exc))
 
@@ -105,6 +112,12 @@ def main() -> None:
     if not args.dry_run and not args.skip_harvest:
         task = ogm_harvest_all.delay(trigger="nightly")
         harvest_task_id = task.id
+        print(f"Harvest batch queued: {harvest_task_id}", flush=True)
+        if args.wait:
+            from app.tasks.worker import celery_app
+            from scripts.wait_ogm_harvest import wait_for_harvest
+
+            wait_for_harvest(task, celery_app.AsyncResult)
 
     print(
         json.dumps(
@@ -116,6 +129,7 @@ def main() -> None:
                 "upserted": 0 if args.dry_run else upserted,
                 "harvest_enqueued": bool(harvest_task_id),
                 "harvest_task_id": harvest_task_id,
+                "harvest_completed": bool(args.wait and harvest_task_id),
                 "dry_run": bool(args.dry_run),
             },
             indent=2,

@@ -14,8 +14,9 @@ concurrency:
 
 jobs:
   trigger-nightly-sync:
-    name: Trigger Production OGM Sync
+    name: Harvest and Reindex Production
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
       - name: Start SSH agent
@@ -31,7 +32,7 @@ jobs:
           mkdir -p "$HOME/.ssh"
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> "$HOME/.ssh/known_hosts"
 
-      - name: Refresh OGM repos and enqueue nightly harvest
+      - name: Refresh repositories, harvest, and verify indexing
         env:
           SSH_HOST: ${{ secrets.OGM_KAMAL_SSH_HOST }}
           SSH_PORT: ${{ secrets.OGM_KAMAL_SSH_PORT || '22' }}
@@ -62,5 +63,5 @@ jobs:
             fi
 
             echo "Using container: $container"
-            docker exec "$container" python /app/backend/scripts/trigger_ogm_nightly_sync.py
+            docker exec "$container" python /app/backend/scripts/trigger_ogm_nightly_sync.py --wait
           '

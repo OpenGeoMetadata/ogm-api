@@ -2,14 +2,16 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote, urlencode
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.api.errors import PUBLIC_ERROR_RESPONSES
 from app.api.schemas import OGMHarvestFailuresResponse, OGMRepoSummariesResponse
 from app.api.v1.utils import create_response
+from app.services.ogm_harvest.index_status import get_index_status
 from app.services.ogm_harvest.repository import OGMHarvestRepository
 
 router = APIRouter()
@@ -48,56 +50,43 @@ async def list_public_ogm_repos():
     response_class=HTMLResponse,
 )
 async def ogm_repo_dashboard(request: Request):
-    repos = await ogm_repo.list_public_repo_summaries()
-
+    try:
+        index_status = await get_index_status()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="Search index status is unavailable. Please try again later."
+        ) from exc
+    catalog = {r["ogm_repo_name"]: r for r in await ogm_repo.list_public_repo_summaries()}
     dashboard_repos = []
-    counts = await ogm_repo.get_public_dashboard_counts()
-    repos_with_aardvark = 0
     enabled_repos = 0
-    never_harvested = 0
-
-    for repo in repos:
-        unpublished_count = int(repo.get("unpublished_record_count") or 0)
-        has_aardvark = bool(repo.get("ogm_has_aardvark"))
+    for name, count in sorted(index_status["repo_counts"].items()):
+        if count <= 0:
+            continue
+        repo = catalog.get(name, {"ogm_repo_name": name})
         enabled = bool(repo.get("ogm_enabled")) and not repo.get("ogm_archived", False)
-        last_harvest_completed = repo.get("last_crawl_completed_at")
-        api_hidden_breakdown = []
-        if unpublished_count:
-            api_hidden_breakdown.append({"count": unpublished_count, "label": "unpublished"})
-        if repo.get("other_active_source_count"):
-            api_hidden_breakdown.append(
-                {"count": repo["other_active_source_count"], "label": "also in active sources"}
-            )
-
-        repos_with_aardvark += int(has_aardvark)
-        enabled_repos += int(enabled)
-        never_harvested += int(not bool(last_harvest_completed))
-
+        scheduled = enabled and repo.get("ogm_watch_mode") in {
+            "nightly",
+            "weekly",
+            "scheduled",
+            "both",
+        }
+        enabled_repos += int(scheduled)
         dashboard_repos.append(
             {
                 **repo,
+                "ogm_github_url": repo.get("ogm_github_url")
+                or f"https://github.com/OpenGeoMetadata/{quote(name, safe='')}",
+                "ogm_search_url": "/api/v1/search?" + urlencode({"ogm_repo": name}),
                 "display_last_commit_at": _format_timestamp(repo.get("last_commit_at")),
-                "display_last_harvest_at": _format_timestamp(last_harvest_completed),
-                "display_last_harvest_started_at": _format_timestamp(
-                    repo.get("last_crawl_started_at")
-                ),
-                "source_status": "Archived"
-                if repo.get("ogm_archived")
-                else ("Active" if enabled else "Disabled"),
-                "api_hidden_breakdown": api_hidden_breakdown,
-                "aardvark_status": {True: "present", False: "missing", None: "unknown"}.get(
-                    repo.get("ogm_has_aardvark"), "unknown"
-                ),
+                "display_last_harvest_at": _format_timestamp(repo.get("last_crawl_completed_at")),
+                "source_status": "Nightly" if scheduled else "Not scheduled",
+                "indexed_record_count": count,
             }
         )
-
     summary = {
         "repo_count": len(dashboard_repos),
         "enabled_repo_count": enabled_repos,
-        "repos_with_aardvark_count": repos_with_aardvark,
-        "never_harvested_count": never_harvested,
-        "harvested_record_count": counts["active_record_count"],
-        "available_record_count": counts["published_record_count"],
+        "indexed_record_count": index_status["record_count"],
     }
 
     if templates is None:
@@ -110,9 +99,7 @@ async def ogm_repo_dashboard(request: Request):
                 f'<a href="{escape(repo["ogm_search_url"], quote=True)}">Search API</a></td>'
                 f"<td>{escape(str(repo.get('display_last_commit_at') or '-'))}</td>"
                 f"<td>{escape(str(repo.get('display_last_harvest_at') or '-'))}</td>"
-                f"<td>{repo['aardvark_status']}</td>"
-                f"<td>{int(repo.get('harvested_record_count') or 0)}</td>"
-                f"<td>{int(repo.get('available_record_count') or 0)}</td>"
+                f"<td>{repo['indexed_record_count']}</td>"
                 "</tr>"
             )
             for repo in dashboard_repos
@@ -126,8 +113,7 @@ async def ogm_repo_dashboard(request: Request):
                 "<p>Templates are unavailable, showing a minimal fallback view.</p>"
                 "<table><thead><tr>"
                 "<th>Repository</th><th>Last commit</th><th>Last harvest</th>"
-                "<th>Aardvark</th><th>Last-seen source records</th>"
-                "<th>Published with source tag (database)</th>"
+                "<th>Indexed records</th>"
                 f"</tr></thead><tbody>{rows}</tbody></table></body></html>"
             )
         )

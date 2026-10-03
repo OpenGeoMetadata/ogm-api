@@ -803,3 +803,19 @@ PostgreSQL records. Database rows removed entirely are outside this helper's sco
 Dashboard harvested totals count repository memberships, so shared IDs can appear
 more than once. Its published total covers repository-tagged database records;
 search also includes published records without a repository tag.
+
+### Nightly harvest and indexing verification
+
+The Nightly OGM Sync GitHub Actions workflow runs daily at 07:15 UTC (02:15 CDT,
+01:15 CST); GitHub may delay scheduled starts. It refreshes the repository catalog,
+harvests every enabled scheduled source, and synchronizes each source into the
+live search index. The workflow uses `trigger_ogm_nightly_sync.py --wait` and only
+succeeds after every child harvest reports zero import errors and a completed
+search synchronization with zero indexing errors. Failures and a five-hour wait
+timeout fail the workflow. The existing concurrency group prevents overlapping
+workflow runs while their harvests are being monitored.
+
+Deploy the updated trigger and wait scripts before running the updated workflow.
+Container-based nightly cron remains disabled to avoid a second scheduler.
+The repository dashboard lists sources with records in Elasticsearch, using live
+index counts rather than database publication counts.
