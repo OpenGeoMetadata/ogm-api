@@ -2,12 +2,42 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlencode
 
 from sqlalchemy import String, cast, func, literal, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.database import database
 from db.models import ogm_harvest_runs, ogm_repos, ogm_resource_state, resources
+
+
+def _published_resources():
+    return func.lower(
+        func.coalesce(
+            func.nullif(resources.c.b1g_publication_state_s, cast(literal(""), String())),
+            func.nullif(resources.c.publication_state, cast(literal(""), String())),
+            cast(literal("published"), String()),
+        )
+    ) == cast(literal("published"), String())
+
+
+def _active_memberships():
+    return (
+        select(
+            ogm_resource_state.c.ogm_resource_id,
+            ogm_resource_state.c.ogm_repo_name,
+        )
+        .select_from(
+            ogm_resource_state.join(
+                ogm_repos, ogm_resource_state.c.ogm_repo_name == ogm_repos.c.ogm_repo_name
+            )
+        )
+        .where(
+            ogm_resource_state.c.ogm_missing_since.is_(None),
+            ogm_repos.c.ogm_enabled.is_(True),
+            func.coalesce(ogm_repos.c.ogm_tags["ogm_archived"].as_boolean(), False).is_(False),
+        )
+    )
 
 
 class OGMHarvestRepository:
@@ -21,6 +51,26 @@ class OGMHarvestRepository:
     async def list_repos(self) -> List[Dict[str, Any]]:
         rows = await database.fetch_all(select(ogm_repos).order_by(ogm_repos.c.ogm_repo_name))
         return [dict(r) for r in rows]
+
+    async def get_public_dashboard_counts(self) -> Dict[str, int]:
+        """Count unique active-source records and all published database records."""
+        active = _active_memberships().subquery("active_memberships")
+        row = await database.fetch_one(
+            select(
+                select(func.count(func.distinct(active.c.ogm_resource_id)))
+                .select_from(active.join(resources, resources.c.id == active.c.ogm_resource_id))
+                .scalar_subquery()
+                .label("active_record_count"),
+                select(func.count())
+                .select_from(resources)
+                .where(_published_resources())
+                .scalar_subquery()
+                .label("published_record_count"),
+            )
+        )
+        return {
+            key: int(row[key] or 0) for key in ("active_record_count", "published_record_count")
+        }
 
     async def list_public_repo_summaries(self) -> List[Dict[str, Any]]:
         """
@@ -86,9 +136,32 @@ class OGMHarvestRepository:
             .subquery("resource_counts")
         )
 
+        active = _active_memberships().subquery("active_memberships")
+        other_active_counts = (
+            select(
+                ogm_resource_state.c.ogm_repo_name,
+                func.count(func.distinct(ogm_resource_state.c.ogm_resource_id)).label(
+                    "other_active_source_count"
+                ),
+            )
+            .select_from(
+                ogm_resource_state.join(
+                    active,
+                    (ogm_resource_state.c.ogm_resource_id == active.c.ogm_resource_id)
+                    & (ogm_resource_state.c.ogm_repo_name != active.c.ogm_repo_name),
+                )
+            )
+            .where(ogm_resource_state.c.ogm_missing_since.is_(None))
+            .group_by(ogm_resource_state.c.ogm_repo_name)
+            .subquery("other_active_counts")
+        )
+
         q = (
             select(
                 ogm_repos.c.ogm_repo_name,
+                func.coalesce(other_active_counts.c.other_active_source_count, 0).label(
+                    "other_active_source_count"
+                ),
                 ogm_repos.c.ogm_enabled,
                 ogm_repos.c.ogm_watch_mode,
                 ogm_repos.c.ogm_last_harvest_started_at,
@@ -116,8 +189,10 @@ class OGMHarvestRepository:
             )
             .select_from(
                 ogm_repos.outerjoin(
-                    latest_run_ids, ogm_repos.c.ogm_repo_name == latest_run_ids.c.repo_name
+                    other_active_counts,
+                    ogm_repos.c.ogm_repo_name == other_active_counts.c.ogm_repo_name,
                 )
+                .outerjoin(latest_run_ids, ogm_repos.c.ogm_repo_name == latest_run_ids.c.repo_name)
                 .outerjoin(
                     ogm_harvest_runs, ogm_harvest_runs.c.ogm_id == latest_run_ids.c.latest_ogm_id
                 )
@@ -154,19 +229,25 @@ class OGMHarvestRepository:
                 "ogm_last_harvest_completed_at"
             )
             repo_full_name = tags.get("ogm_repo_full_name") or item.get("ogm_repo_name")
+            if repo_full_name and "/" not in repo_full_name:
+                repo_full_name = f"OpenGeoMetadata/{repo_full_name}"
             has_aardvark = tags.get("ogm_has_aardvark")
-            if has_aardvark is None:
-                has_aardvark = not bool(tags.get("ogm_missing_aardvark"))
+            if has_aardvark is None and "ogm_missing_aardvark" in tags:
+                has_aardvark = not bool(tags["ogm_missing_aardvark"])
             summaries.append(
                 {
                     "ogm_repo_name": item.get("ogm_repo_name"),
                     "ogm_repo_full_name": repo_full_name,
                     "ogm_github_url": (
-                        f"https://github.com/{repo_full_name}" if repo_full_name else None
+                        f"https://github.com/{quote(repo_full_name, safe='/')}"
+                        if repo_full_name
+                        else None
                     ),
+                    "ogm_search_url": "/api/v1/search?"
+                    + urlencode({"ogm_repo": item["ogm_repo_name"]}),
                     "ogm_enabled": item.get("ogm_enabled"),
                     "ogm_watch_mode": item.get("ogm_watch_mode"),
-                    "ogm_has_aardvark": bool(has_aardvark),
+                    "ogm_has_aardvark": has_aardvark,
                     "ogm_default_branch": tags.get("ogm_default_branch"),
                     "ogm_archived": bool(tags.get("ogm_archived", False)),
                     "last_commit_at": tags.get("ogm_pushed_at"),
@@ -178,6 +259,7 @@ class OGMHarvestRepository:
                     "harvested_success_count": _to_int(stats.get("imported")),
                     "harvested_failure_count": _to_int(stats.get("errors")),
                     "harvested_record_count": _to_int(item.get("harvested_record_count")),
+                    "other_active_source_count": _to_int(item.get("other_active_source_count")),
                     "available_record_count": _to_int(item.get("available_record_count")),
                     "suppressed_record_count": _to_int(item.get("suppressed_record_count")),
                     "unpublished_record_count": _to_int(item.get("unpublished_record_count")),

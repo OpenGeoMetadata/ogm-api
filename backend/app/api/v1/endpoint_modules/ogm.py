@@ -51,29 +51,24 @@ async def ogm_repo_dashboard(request: Request):
     repos = await ogm_repo.list_public_repo_summaries()
 
     dashboard_repos = []
-    total_harvested = 0
-    total_available = 0
+    counts = await ogm_repo.get_public_dashboard_counts()
     repos_with_aardvark = 0
     enabled_repos = 0
     never_harvested = 0
 
     for repo in repos:
-        harvested_count = int(repo.get("harvested_record_count") or 0)
-        available_count = int(repo.get("available_record_count") or 0)
         unpublished_count = int(repo.get("unpublished_record_count") or 0)
         has_aardvark = bool(repo.get("ogm_has_aardvark"))
-        enabled = bool(repo.get("ogm_enabled"))
+        enabled = bool(repo.get("ogm_enabled")) and not repo.get("ogm_archived", False)
         last_harvest_completed = repo.get("last_crawl_completed_at")
-        hidden_count = max(harvested_count - available_count, 0)
-        other_hidden_count = max(hidden_count - unpublished_count, 0)
         api_hidden_breakdown = []
         if unpublished_count:
             api_hidden_breakdown.append({"count": unpublished_count, "label": "unpublished"})
-        if other_hidden_count:
-            api_hidden_breakdown.append({"count": other_hidden_count, "label": "not yet synced"})
+        if repo.get("other_active_source_count"):
+            api_hidden_breakdown.append(
+                {"count": repo["other_active_source_count"], "label": "also in active sources"}
+            )
 
-        total_harvested += harvested_count
-        total_available += available_count
         repos_with_aardvark += int(has_aardvark)
         enabled_repos += int(enabled)
         never_harvested += int(not bool(last_harvest_completed))
@@ -86,8 +81,13 @@ async def ogm_repo_dashboard(request: Request):
                 "display_last_harvest_started_at": _format_timestamp(
                     repo.get("last_crawl_started_at")
                 ),
-                "harvest_gap_count": hidden_count,
+                "source_status": "Archived"
+                if repo.get("ogm_archived")
+                else ("Active" if enabled else "Disabled"),
                 "api_hidden_breakdown": api_hidden_breakdown,
+                "aardvark_status": {True: "present", False: "missing", None: "unknown"}.get(
+                    repo.get("ogm_has_aardvark"), "unknown"
+                ),
             }
         )
 
@@ -96,18 +96,21 @@ async def ogm_repo_dashboard(request: Request):
         "enabled_repo_count": enabled_repos,
         "repos_with_aardvark_count": repos_with_aardvark,
         "never_harvested_count": never_harvested,
-        "harvested_record_count": total_harvested,
-        "available_record_count": total_available,
+        "harvested_record_count": counts["active_record_count"],
+        "available_record_count": counts["published_record_count"],
     }
 
     if templates is None:
         rows = "".join(
             (
                 "<tr>"
-                f"<td>{escape(str(repo.get('ogm_repo_name') or ''))}</td>"
+                f'<td><a href="{escape(repo["ogm_github_url"], quote=True)}">'
+                f"{escape(str(repo.get('ogm_repo_name') or ''))}</a> "
+                f"({escape(repo['source_status'])}) "
+                f'<a href="{escape(repo["ogm_search_url"], quote=True)}">Search API</a></td>'
                 f"<td>{escape(str(repo.get('display_last_commit_at') or '-'))}</td>"
                 f"<td>{escape(str(repo.get('display_last_harvest_at') or '-'))}</td>"
-                f"<td>{'yes' if repo.get('ogm_has_aardvark') else 'no'}</td>"
+                f"<td>{repo['aardvark_status']}</td>"
                 f"<td>{int(repo.get('harvested_record_count') or 0)}</td>"
                 f"<td>{int(repo.get('available_record_count') or 0)}</td>"
                 "</tr>"
@@ -123,7 +126,8 @@ async def ogm_repo_dashboard(request: Request):
                 "<p>Templates are unavailable, showing a minimal fallback view.</p>"
                 "<table><thead><tr>"
                 "<th>Repository</th><th>Last commit</th><th>Last harvest</th>"
-                "<th>Aardvark</th><th>Harvested</th><th>Available</th>"
+                "<th>Aardvark</th><th>Last-seen source records</th>"
+                "<th>Published with source tag (database)</th>"
                 f"</tr></thead><tbody>{rows}</tbody></table></body></html>"
             )
         )

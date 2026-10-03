@@ -54,6 +54,12 @@ async def test_public_repo_counts_preserve_tag_and_publication_semantics(
     if not url:
         pytest.skip("Set OGM_QUERY_TEST_DATABASE_URL to run isolated PostgreSQL query tests")
     connection = await asyncpg.connect(url)
+    import json
+
+    for name in ("json", "jsonb"):
+        await connection.set_type_codec(
+            name, schema="pg_catalog", encoder=json.dumps, decoder=json.loads
+        )
     try:
         for table in (ogm_repos, ogm_harvest_runs, ogm_resource_state):
             ddl = str(CreateTable(table).compile(dialect=database._backend._dialect))
@@ -114,5 +120,77 @@ async def test_public_repo_counts_preserve_tag_and_publication_semantics(
         assert summaries[0]["last_crawl_status"] == "success"
         assert summaries[1]["ogm_enabled"] is False
         assert summaries[2]["last_run_id"] is None
+        # A second dataset covers migrations, overlapping active sources, missing
+        # records, and published records without repository attribution.
+        await connection.execute("""
+            TRUNCATE ogm_resource_state, ogm_harvest_runs, ogm_repos, resources;
+            INSERT INTO ogm_repos (ogm_repo_name, ogm_enabled, ogm_tags) VALUES
+                ('live',true,'{}'), ('live2',true,'{}'),
+                ('archived',true,'{"ogm_archived":true}'), ('disabled',false,'{}');
+            INSERT INTO resources VALUES
+                ('shared',ARRAY['ogm_repo:live','ogm_repo:live2'],'published','published',false),
+                ('migrated',ARRAY['ogm_repo:live'],'published','published',false),
+                ('retired',ARRAY['ogm_repo:archived'],'unpublished','unpublished',false),
+                ('untagged',NULL,NULL,NULL,false),
+                ('missing',ARRAY['ogm_repo:live'],'published','published',false),
+                ('archived-only',ARRAY['ogm_repo:archived'],'published','published',false),
+                ('disabled-only',ARRAY['ogm_repo:disabled'],'published','published',false),
+                ('draft',ARRAY['ogm_repo:live'],'DRAFT','published',false);
+            INSERT INTO ogm_resource_state (ogm_repo_name,ogm_resource_id,ogm_missing_since) VALUES
+                ('live','shared',NULL), ('live2','shared',NULL),
+                ('live','migrated',NULL), ('archived','migrated',NULL),
+                ('archived','retired',NULL), ('archived','archived-only',NULL),
+                ('disabled','disabled-only',NULL), ('live','missing',now()),
+                ('live','draft',NULL);
+        """)
+
+        async def fetch_one(query):
+            rows = await fetch_all(query)
+            return rows[0]
+
+        monkeypatch.setattr(ogm_repository.database, "fetch_one", fetch_one)
+        assert await OGMHarvestRepository().get_public_dashboard_counts() == {
+            "active_record_count": 3,
+            "published_record_count": 6,
+        }
+        rows = {
+            r["ogm_repo_name"]: r for r in await OGMHarvestRepository().list_public_repo_summaries()
+        }
+        assert rows["archived"]["other_active_source_count"] == 1
+        assert rows["live"]["other_active_source_count"] == 1
+        assert rows["live2"]["other_active_source_count"] == 1
+        assert rows["disabled"]["other_active_source_count"] == 0
+        assert rows["disabled"]["ogm_github_url"] == "https://github.com/OpenGeoMetadata/disabled"
+        assert rows["disabled"]["ogm_has_aardvark"] is None
+        assert rows["live"]["ogm_search_url"] == "/api/v1/search?ogm_repo=live"
     finally:
         await connection.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_name", [None, "edu.example", "OpenGeoMetadata/edu.example"])
+async def test_repository_links_use_org_and_active_source_filter(monkeypatch, full_name):
+    from unittest.mock import AsyncMock
+    from urllib.parse import parse_qs, urlparse
+
+    from app.services.search_service import SearchService
+
+    monkeypatch.setattr(
+        ogm_repository.database,
+        "fetch_all",
+        AsyncMock(
+            return_value=[
+                {
+                    "ogm_repo_name": "edu.example",
+                    "ogm_tags": {"ogm_repo_full_name": full_name},
+                }
+            ]
+        ),
+    )
+    row = (await OGMHarvestRepository().list_public_repo_summaries())[0]
+    assert row["ogm_github_url"] == "https://github.com/OpenGeoMetadata/edu.example"
+    query = urlparse(row["ogm_search_url"]).query
+    assert parse_qs(query) == {"ogm_repo": ["edu.example"]}
+    included, excluded = SearchService().extract_new_style_filters(query)
+    assert included == {"ogm_repo": ["edu.example"]}
+    assert excluded == {}

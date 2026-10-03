@@ -1,8 +1,12 @@
 from unittest.mock import AsyncMock, patch
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.api.v1.endpoint_modules import ogm
+
+app = FastAPI()
+app.include_router(ogm.router, prefix="/api/v1")
 
 client = TestClient(app)
 
@@ -41,6 +45,7 @@ def test_public_ogm_repo_dashboard_renders_html_monitor():
             "ogm_repo_name": "edu.utexas",
             "ogm_repo_full_name": "OpenGeoMetadata/edu.utexas",
             "ogm_github_url": "https://github.com/OpenGeoMetadata/edu.utexas",
+            "ogm_search_url": "/api/v1/search?ogm_repo=edu.utexas",
             "ogm_enabled": True,
             "ogm_watch_mode": "nightly",
             "ogm_has_aardvark": True,
@@ -58,11 +63,16 @@ def test_public_ogm_repo_dashboard_renders_html_monitor():
         }
     ]
 
-    with patch(
-        "app.api.v1.endpoint_modules.ogm.ogm_repo.list_public_repo_summaries",
-        new_callable=AsyncMock,
-    ) as mock_summaries:
-        mock_summaries.return_value = sample_repos
+    with (
+        patch.object(
+            ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=sample_repos)
+        ),
+        patch.object(
+            ogm.ogm_repo,
+            "get_public_dashboard_counts",
+            AsyncMock(return_value={"active_record_count": 904, "published_record_count": 1234}),
+        ),
+    ):
         response = client.get("/api/v1/ogm/repos/dashboard")
 
     assert response.status_code == 200
@@ -72,6 +82,8 @@ def test_public_ogm_repo_dashboard_renders_html_monitor():
     assert "OpenGeoMetadata/edu.utexas" in response.text
     assert "/api/v1/ogm/repos" in response.text
     assert "3 unpublished" in response.text
+    assert 'href="https://github.com/OpenGeoMetadata/edu.utexas"' in response.text
+    assert 'href="/api/v1/search?ogm_repo=edu.utexas"' in response.text
 
 
 def test_public_ogm_failures_endpoint_lists_failed_runs():
@@ -155,3 +167,59 @@ def test_public_ogm_failures_endpoint_can_limit_to_hard_failures_only():
         limit=50,
         offset=0,
     )
+
+
+def test_dashboard_distinguishes_retired_sources_and_uses_global_counts():
+    repos = [
+        {
+            "ogm_repo_name": "edu.umn",
+            "ogm_enabled": True,
+            "ogm_archived": True,
+            "last_crawl_status": "success",
+            "harvested_record_count": 6332,
+            "available_record_count": 0,
+            "unpublished_record_count": 441,
+            "other_active_source_count": 5891,
+        },
+        {
+            "ogm_repo_name": "gov.usgs",
+            "ogm_enabled": False,
+            "harvested_record_count": 177789,
+            "available_record_count": 0,
+            "other_active_source_count": 177789,
+        },
+        {
+            "ogm_repo_name": "geobtaa",
+            "ogm_enabled": True,
+            "harvested_record_count": 40703,
+            "available_record_count": 40703,
+        },
+    ]
+    with (
+        patch.object(ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=repos)),
+        patch.object(
+            ogm.ogm_repo,
+            "get_public_dashboard_counts",
+            AsyncMock(
+                return_value={"active_record_count": 315135, "published_record_count": 318408}
+            ),
+        ),
+    ):
+        response = client.get("/api/v1/ogm/repos/dashboard")
+    assert response.status_code == 200
+    html = response.text
+    for expected in (
+        "Archived",
+        "Disabled",
+        "Active",
+        "315,135",
+        "318,408",
+        "5,891 also in active sources",
+        "177,789 also in active sources",
+        "Last Harvest Result",
+        "Published Records (Database)",
+    ):
+        assert expected in html
+    assert "not yet synced" not in html
+    assert "hidden from API" not in html
+    assert "does not verify the live search index" in html
