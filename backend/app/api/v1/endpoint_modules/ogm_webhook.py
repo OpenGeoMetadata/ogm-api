@@ -17,7 +17,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 EVENT_DRIVEN_WATCH_MODES = {"webhook", "both", "nightly"}
-REPOSITORY_DISCOVERY_ACTIONS = {"created", "publicized", "renamed", "transferred", "unarchived"}
+REPOSITORY_DISCOVERY_ACTIONS = {
+    "created",
+    "publicized",
+    "renamed",
+    "transferred",
+    "archived",
+    "unarchived",
+}
 
 
 def _verify_github_signature(body: bytes, signature_header: Optional[str], secret: str) -> bool:

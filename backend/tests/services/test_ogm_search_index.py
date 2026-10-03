@@ -37,7 +37,7 @@ async def test_harvest_requires_search_sync_before_reporting_success(monkeypatch
 
     repo = MagicMock()
     for name in (
-        "upsert_repo",
+        "ensure_repo",
         "mark_repo_harvest_started",
         "cancel_other_running_runs",
         "update_harvest_run",
@@ -45,6 +45,7 @@ async def test_harvest_requires_search_sync_before_reporting_success(monkeypatch
         "mark_repo_harvest_completed",
     ):
         setattr(repo, name, AsyncMock())
+    repo.get_repo = AsyncMock(return_value={"ogm_enabled": True})
     repo.create_harvest_run = AsyncMock(return_value=1)
     importer = MagicMock(changed_thumbnail_resource_ids=set())
     importer.upsert_stream = AsyncMock(return_value={"imported": 1, "errors": 0})
@@ -72,3 +73,40 @@ async def test_harvest_requires_search_sync_before_reporting_success(monkeypatch
         assert result["stats"]["search_index"] == {"indexed": 1, "errors": 0}
         assert repo.finalize_harvest_run.await_args.kwargs["ogm_status"] == "success"
     search.assert_awaited_once_with("repo")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"ogm_enabled": False},
+        {"ogm_enabled": True, "ogm_tags": {"ogm_archived": True}},
+    ],
+)
+async def test_harvest_skips_disabled_or_archived_repo(monkeypatch, settings):
+    from app.services.ogm_harvest import harvest
+
+    repo = MagicMock()
+    repo.ensure_repo = AsyncMock()
+    repo.get_repo = AsyncMock(return_value=settings)
+    syncer = MagicMock()
+    monkeypatch.setattr(harvest, "OGMHarvestRepository", lambda: repo)
+    monkeypatch.setattr(harvest, "OGMRepoSync", syncer)
+    result = await harvest.harvest_repo("edu.umn", trigger="push")
+    assert result["status"] == "skipped"
+    syncer.assert_not_called()
+    repo.upsert_repo.assert_not_called()
+    repo.mark_repo_harvest_started.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_repo_does_not_overwrite_catalog_settings(monkeypatch):
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.ogm_harvest import repository
+
+    execute = AsyncMock()
+    monkeypatch.setattr(repository.database, "execute", execute)
+    await repository.OGMHarvestRepository().ensure_repo("geobtaa")
+    statement = str(execute.await_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "ON CONFLICT (ogm_repo_name) DO NOTHING" in statement

@@ -27,10 +27,17 @@ async def harvest_repo(
     Returns a dict with run_id, repo, commit, stats, and missing_count.
     """
     repo = OGMHarvestRepository()
+    await repo.ensure_repo(repo_name)
+    configured = await repo.get_repo(repo_name)
+    if configured and (
+        not configured.get("ogm_enabled", True)
+        or (configured.get("ogm_tags") or {}).get("ogm_archived", False)
+    ):
+        return {"ogm_repo_name": repo_name, "status": "skipped", "reason": "disabled or archived"}
+
     syncer = OGMRepoSync(base_dir=checkout_base_dir)
     importer = OGMResourceImporter(repo=repo)
 
-    await repo.upsert_repo(ogm_repo_name=repo_name)
     await repo.mark_repo_harvest_started(repo_name)
     run_id = await repo.create_harvest_run(ogm_repo_name=repo_name, ogm_trigger=trigger)
     run_started_at = datetime.utcnow()

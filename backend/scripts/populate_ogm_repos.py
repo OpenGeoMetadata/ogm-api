@@ -217,7 +217,7 @@ def main():
     parser.add_argument(
         "--include-archived",
         action="store_true",
-        help="Include archived repos (default: skip archived)",
+        help="Deprecated compatibility flag; archived repos are always recorded as disabled",
     )
     args = parser.parse_args()
 
@@ -229,8 +229,7 @@ def main():
     sync_db_url = _sync_database_url(database_url)
 
     repos = list_org_repos(args.org, token, per_page=args.per_page)
-    if not args.include_archived:
-        repos = [r for r in repos if not r.get("archived", False)]
+    # Reconcile archived repos too, so previously enabled entries become disabled.
 
     if args.limit:
         repos = repos[: args.limit]

@@ -71,7 +71,7 @@ async def _ogm_harvest_all_async(trigger: str) -> Dict[str, Any]:
     repos = await repo.list_repos()
     selected = []
     for r in repos:
-        if not r.get("ogm_enabled", True):
+        if not r.get("ogm_enabled", True) or (r.get("ogm_tags") or {}).get("ogm_archived"):
             continue
         mode = (r.get("ogm_watch_mode") or "").lower()
         if trigger.lower() in SCHEDULED_OGM_TRIGGERS and mode not in SCHEDULED_OGM_WATCH_MODES:

@@ -80,3 +80,13 @@ representations that may contain an older asset URL. This refresh can be disable
 with `OGM_THUMBNAIL_REFRESH_ENABLED=false`; a refresh failure is recorded in the
 harvest statistics and does not turn an otherwise successful metadata harvest
 into a failure.
+
+Repository discovery always reconciles archived GitHub repositories into the
+catalog as disabled with manual watch mode, including repositories that were
+previously enabled. The legacy `--include-archived` flag is accepted for
+compatibility but is no longer needed. Archived BTAA repositories are replaced
+by the active `geobtaa` repository. Harvest jobs check the saved enabled/archive
+status before pulling and preserve catalog settings when starting a run.
+The standalone harvester also excludes archived checkouts when streaming records.
+Existing records are retained until refreshed from their current source; disabling
+a repository does not delete its previously harvested records.
