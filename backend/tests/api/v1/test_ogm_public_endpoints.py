@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -221,3 +222,63 @@ def test_dashboard_empty_index():
         response = client.get("/api/v1/ogm/repos/dashboard")
     assert response.status_code == 200
     assert "No repositories currently have indexed records" in response.text
+
+
+@pytest.mark.parametrize(
+    "stage,label",
+    [
+        ("sync", "Fetching metadata"),
+        ("import", "Importing records"),
+        ("search_index", "Updating search index"),
+        ("thumbnail_refresh", "Refreshing thumbnails"),
+        ("dumps", "Saving harvest files"),
+        (None, "Processing"),
+        ("future_stage", "Processing"),
+    ],
+)
+def test_dashboard_separates_running_progress_from_last_success(stage, label):
+    repo = {
+        "ogm_repo_name": "gov.usgs.htmc",
+        "last_crawl_status": "running",
+        "last_crawl_started_at": "2026-10-04T13:20:00",
+        "last_successful_harvest_at": "2026-10-03T13:10:00",
+        "last_run_stage": stage,
+    }
+    with (
+        patch.object(ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=[repo])),
+        patch.object(
+            ogm,
+            "get_index_status",
+            AsyncMock(
+                return_value={"record_count": 177789, "repo_counts": {"gov.usgs.htmc": 177789}}
+            ),
+        ),
+    ):
+        html = client.get("/api/v1/ogm/repos/dashboard").text
+    assert "Last Successful Harvest" in html
+    assert "2026-10-03 13:10 UTC" in html
+    assert "Started 2026-10-04 13:20 UTC" in html
+    assert label in html
+    assert "Running" in html
+
+
+@pytest.mark.parametrize("status", ["failed", "success", "running"])
+def test_dashboard_does_not_invent_success_from_latest_completion(status):
+    repo = {
+        "ogm_repo_name": "example",
+        "last_crawl_status": status,
+        "last_crawl_completed_at": "2026-10-04T14:00:00",
+        "last_run_stage": "search_index",
+    }
+    with (
+        patch.object(ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=[repo])),
+        patch.object(
+            ogm,
+            "get_index_status",
+            AsyncMock(return_value={"record_count": 1, "repo_counts": {"example": 1}}),
+        ),
+    ):
+        html = client.get("/api/v1/ogm/repos/dashboard").text
+    assert "No successful harvest recorded" in html
+    assert "2026-10-04 14:00 UTC" not in html
+    assert ("Updating search index" in html) == (status == "running")

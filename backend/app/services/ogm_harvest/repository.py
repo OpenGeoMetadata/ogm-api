@@ -90,6 +90,15 @@ class OGMHarvestRepository:
             .group_by(ogm_harvest_runs.c.ogm_repo_name)
             .subquery()
         )
+        last_successful_runs = (
+            select(
+                ogm_harvest_runs.c.ogm_repo_name,
+                func.max(ogm_harvest_runs.c.ogm_completed_at).label("last_successful_harvest_at"),
+            )
+            .where(ogm_harvest_runs.c.ogm_status == "success")
+            .group_by(ogm_harvest_runs.c.ogm_repo_name)
+            .subquery("last_successful_runs")
+        )
         harvested_counts = (
             select(
                 ogm_resource_state.c.ogm_repo_name,
@@ -169,6 +178,7 @@ class OGMHarvestRepository:
                 ogm_repos.c.ogm_last_harvest_status,
                 ogm_repos.c.ogm_last_commit_sha,
                 ogm_repos.c.ogm_tags,
+                last_successful_runs.c.last_successful_harvest_at,
                 ogm_harvest_runs.c.ogm_id.label("last_run_id"),
                 ogm_harvest_runs.c.ogm_started_at.label("last_run_started_at"),
                 ogm_harvest_runs.c.ogm_completed_at.label("last_run_completed_at"),
@@ -191,6 +201,10 @@ class OGMHarvestRepository:
                 ogm_repos.outerjoin(
                     other_active_counts,
                     ogm_repos.c.ogm_repo_name == other_active_counts.c.ogm_repo_name,
+                )
+                .outerjoin(
+                    last_successful_runs,
+                    last_successful_runs.c.ogm_repo_name == ogm_repos.c.ogm_repo_name,
                 )
                 .outerjoin(latest_run_ids, ogm_repos.c.ogm_repo_name == latest_run_ids.c.repo_name)
                 .outerjoin(
@@ -225,8 +239,11 @@ class OGMHarvestRepository:
             latest_started_at = item.get("last_run_started_at") or item.get(
                 "ogm_last_harvest_started_at"
             )
-            latest_completed_at = item.get("last_run_completed_at") or item.get(
-                "ogm_last_harvest_completed_at"
+            # A running run has no completion time; never borrow an older run's timestamp.
+            latest_completed_at = (
+                item.get("last_run_completed_at")
+                if item.get("last_run_id") is not None
+                else item.get("ogm_last_harvest_completed_at")
             )
             repo_full_name = tags.get("ogm_repo_full_name") or item.get("ogm_repo_name")
             if repo_full_name and "/" not in repo_full_name:
@@ -256,6 +273,8 @@ class OGMHarvestRepository:
                     "last_crawl_completed_at": latest_completed_at,
                     "last_crawl_status": latest_status,
                     "last_run_id": item.get("last_run_id"),
+                    "last_run_stage": stats.get("stage") if latest_status == "running" else None,
+                    "last_successful_harvest_at": item.get("last_successful_harvest_at"),
                     "harvested_success_count": _to_int(stats.get("imported")),
                     "harvested_failure_count": _to_int(stats.get("errors")),
                     "harvested_record_count": _to_int(item.get("harvested_record_count")),

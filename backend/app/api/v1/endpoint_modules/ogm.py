@@ -78,7 +78,17 @@ async def ogm_repo_dashboard(request: Request):
                 or f"https://github.com/OpenGeoMetadata/{quote(name, safe='')}",
                 "ogm_search_url": "/api/v1/search?" + urlencode({"ogm_repo": name}),
                 "display_last_commit_at": _format_timestamp(repo.get("last_commit_at")),
-                "display_last_harvest_at": _format_timestamp(repo.get("last_crawl_completed_at")),
+                "display_last_successful_harvest_at": _format_timestamp(
+                    repo.get("last_successful_harvest_at")
+                ),
+                "display_harvest_started_at": _format_timestamp(repo.get("last_crawl_started_at")),
+                "display_harvest_stage": {
+                    "sync": "Fetching metadata",
+                    "import": "Importing records",
+                    "search_index": "Updating search index",
+                    "thumbnail_refresh": "Refreshing thumbnails",
+                    "dumps": "Saving harvest files",
+                }.get(repo.get("last_run_stage"), "Processing"),
                 "source_status": "Nightly" if scheduled else "Not scheduled",
                 "indexed_record_count": count,
             }
@@ -90,6 +100,7 @@ async def ogm_repo_dashboard(request: Request):
     }
 
     if templates is None:
+        no_success = "No successful harvest recorded"
         rows = "".join(
             (
                 "<tr>"
@@ -98,7 +109,16 @@ async def ogm_repo_dashboard(request: Request):
                 f"({escape(repo['source_status'])}) "
                 f'<a href="{escape(repo["ogm_search_url"], quote=True)}">Search API</a></td>'
                 f"<td>{escape(str(repo.get('display_last_commit_at') or '-'))}</td>"
-                f"<td>{escape(str(repo.get('display_last_harvest_at') or '-'))}</td>"
+                "<td>"
+                f"{escape(repo.get('display_last_successful_harvest_at') or no_success)}"
+                "</td>"
+                f"<td>{escape(str(repo.get('last_crawl_status') or 'Unknown'))}"
+                + (
+                    f" — {escape(repo['display_harvest_stage'])}"
+                    if repo.get("last_crawl_status") == "running"
+                    else ""
+                )
+                + f"; Started {escape(repo.get('display_harvest_started_at') or 'Unknown')}</td>"
                 f"<td>{repo['indexed_record_count']}</td>"
                 "</tr>"
             )
@@ -112,7 +132,8 @@ async def ogm_repo_dashboard(request: Request):
                 "<body><h1>OpenGeoMetadata Repository Dashboard</h1>"
                 "<p>Templates are unavailable, showing a minimal fallback view.</p>"
                 "<table><thead><tr>"
-                "<th>Repository</th><th>Last commit</th><th>Last harvest</th>"
+                "<th>Repository</th><th>Last commit</th><th>Last successful harvest</th>"
+                "<th>Latest harvest</th>"
                 "<th>Indexed records</th>"
                 f"</tr></thead><tbody>{rows}</tbody></table></body></html>"
             )

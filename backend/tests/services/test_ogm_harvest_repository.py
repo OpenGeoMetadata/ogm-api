@@ -120,6 +120,33 @@ async def test_public_repo_counts_preserve_tag_and_publication_semantics(
         assert summaries[0]["last_crawl_status"] == "success"
         assert summaries[1]["ogm_enabled"] is False
         assert summaries[2]["last_run_id"] is None
+        # A newer running or failed run must not replace the last successful completion.
+        await connection.execute("""
+            UPDATE ogm_harvest_runs SET ogm_completed_at='2026-10-03 13:10:00'
+                WHERE ogm_id=2;
+            UPDATE ogm_repos SET ogm_last_harvest_completed_at='2026-10-03 13:10:00'
+                WHERE ogm_repo_name='alpha';
+            INSERT INTO ogm_harvest_runs
+                (ogm_id,ogm_repo_name,ogm_trigger,ogm_status,ogm_started_at,ogm_stats_json)
+            VALUES (3,'alpha','nightly','running','2026-10-04 13:20:00',
+                    '{"stage":"search_index"}');
+        """)
+        current = (await OGMHarvestRepository().list_public_repo_summaries())[0]
+        assert current["last_crawl_completed_at"] is None
+        assert str(current["last_crawl_started_at"]) == "2026-10-04 13:20:00"
+        assert str(current["last_successful_harvest_at"]) == "2026-10-03 13:10:00"
+        assert current["last_run_stage"] == "search_index"
+        await connection.execute("""
+            UPDATE ogm_harvest_runs SET ogm_status='failed',
+                ogm_completed_at='2026-10-04 14:00:00' WHERE ogm_id=3;
+        """)
+        current = (await OGMHarvestRepository().list_public_repo_summaries())[0]
+        assert str(current["last_successful_harvest_at"]) == "2026-10-03 13:10:00"
+        assert str(current["last_crawl_completed_at"]) == "2026-10-04 14:00:00"
+        assert current["last_run_stage"] is None
+        assert (await OGMHarvestRepository().list_public_repo_summaries())[1][
+            "last_successful_harvest_at"
+        ] is None
         # A second dataset covers migrations, overlapping active sources, missing
         # records, and published records without repository attribution.
         await connection.execute("""
