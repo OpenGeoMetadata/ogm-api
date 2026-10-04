@@ -72,8 +72,8 @@
             <tr>
               <th scope="col">Repository</th>
               <th scope="col">Last Commit</th>
-              <th scope="col">Last Harvest</th>
-              <th scope="col">Last Harvest Result</th>
+              <th scope="col">Last Successful Harvest</th>
+              <th scope="col">Latest Harvest</th>
               <th scope="col">Indexed Records</th>
             </tr>
           </thead>
@@ -92,10 +92,10 @@
                 {{ repo.display_last_commit_at or "Never observed" }}
               </td>
               <td>
-                {% if repo.display_last_harvest_at %}
-                <div>{{ repo.display_last_harvest_at }}</div>
+                {% if repo.display_last_successful_harvest_at %}
+                <div>{{ repo.display_last_successful_harvest_at }}</div>
                 {% else %}
-                Never harvested
+                No successful harvest recorded
                 {% endif %}
               </td>
               <td>
@@ -104,10 +104,14 @@
                 <span class="status-pill status-ok">Success</span>
                 {% elif crawl_status == "running" %}
                 <span class="status-pill status-run">Running</span>
+                <p>{{ repo.display_harvest_stage }}</p>
                 {% elif crawl_status == "failed" %}
                 <span class="status-pill status-bad">Failed</span>
                 {% else %}
                 <span class="status-pill status-muted">{{ repo.last_crawl_status or "Unknown" }}</span>
+                {% endif %}
+                {% if repo.display_harvest_started_at %}
+                <p class="repo-subtitle">Started {{ repo.display_harvest_started_at }}</p>
                 {% endif %}
                 {% if repo.harvested_failure_count %}
                 <p class="repo-subtitle">{{ "{:,}".format(repo.harvested_failure_count) }} recent import errors</p>
