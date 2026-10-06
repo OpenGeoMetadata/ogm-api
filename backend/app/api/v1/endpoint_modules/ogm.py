@@ -59,9 +59,15 @@ async def ogm_repo_dashboard(request: Request):
     catalog = {r["ogm_repo_name"]: r for r in await ogm_repo.list_public_repo_summaries()}
     dashboard_repos = []
     enabled_repos = 0
-    for name, count in sorted(index_status["repo_counts"].items()):
-        if count <= 0:
-            continue
+    indexed_counts = index_status["repo_counts"]
+    visible_names = {name for name, count in indexed_counts.items() if count > 0}
+    visible_names.update(
+        name
+        for name, repo in catalog.items()
+        if repo.get("ogm_enabled") and not repo.get("ogm_archived", False)
+    )
+    for name in sorted(visible_names):
+        count = indexed_counts.get(name, 0)
         repo = catalog.get(name, {"ogm_repo_name": name})
         enabled = bool(repo.get("ogm_enabled")) and not repo.get("ogm_archived", False)
         scheduled = enabled and repo.get("ogm_watch_mode") in {
@@ -89,6 +95,15 @@ async def ogm_repo_dashboard(request: Request):
                     "thumbnail_refresh": "Refreshing thumbnails",
                     "dumps": "Saving harvest files",
                 }.get(repo.get("last_run_stage"), "Processing"),
+                "display_harvest_status": repo.get("last_crawl_status")
+                or (
+                    "Awaiting first harvest"
+                    if enabled
+                    and not repo.get("last_crawl_started_at")
+                    and not repo.get("last_successful_harvest_at")
+                    and count == 0
+                    else "Unknown"
+                ),
                 "source_status": "Nightly" if scheduled else "Not scheduled",
                 "indexed_record_count": count,
             }
@@ -112,7 +127,7 @@ async def ogm_repo_dashboard(request: Request):
                 "<td>"
                 f"{escape(repo.get('display_last_successful_harvest_at') or no_success)}"
                 "</td>"
-                f"<td>{escape(str(repo.get('last_crawl_status') or 'Unknown'))}"
+                f"<td>{escape(str(repo['display_harvest_status']))}"
                 + (
                     f" — {escape(repo['display_harvest_stage'])}"
                     if repo.get("last_crawl_status") == "running"

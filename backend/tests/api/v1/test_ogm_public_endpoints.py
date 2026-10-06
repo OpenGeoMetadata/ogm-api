@@ -172,7 +172,7 @@ def test_public_ogm_failures_endpoint_can_limit_to_hard_failures_only():
     )
 
 
-def test_dashboard_only_shows_indexed_sources_even_when_database_disagrees():
+def test_dashboard_shows_enabled_sources_but_keeps_counts_from_index():
     repos = [
         {"ogm_repo_name": "retired", "ogm_enabled": False, "available_record_count": 100},
         {"ogm_repo_name": "empty", "ogm_enabled": True, "available_record_count": 10},
@@ -198,7 +198,15 @@ def test_dashboard_only_shows_indexed_sources_even_when_database_disagrees():
     ):
         response = client.get("/api/v1/ogm/repos/dashboard")
     assert response.status_code == 200
-    for expected in ("318,408", "40,703", "geobtaa", "uncataloged", "Scheduled Nightly"):
+    for expected in (
+        "318,408",
+        "40,703",
+        "geobtaa",
+        "uncataloged",
+        "empty",
+        "Awaiting first harvest",
+        "Scheduled Nightly",
+    ):
         assert expected in response.text
     for absent in ("retired", "Never Harvested Here", "Database", "also in active sources"):
         assert absent not in response.text
@@ -221,7 +229,7 @@ def test_dashboard_empty_index():
     ):
         response = client.get("/api/v1/ogm/repos/dashboard")
     assert response.status_code == 200
-    assert "No repositories currently have indexed records" in response.text
+    assert "No enabled or indexed repositories found" in response.text
 
 
 @pytest.mark.parametrize(
@@ -282,3 +290,33 @@ def test_dashboard_does_not_invent_success_from_latest_completion(status):
     assert "No successful harvest recorded" in html
     assert "2026-10-04 14:00 UTC" not in html
     assert ("Updating search index" in html) == (status == "running")
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_new_collection_visible_before_indexing(fallback):
+    repos = [
+        {
+            "ogm_repo_name": "gov.usgs.tnm",
+            "ogm_enabled": True,
+            "ogm_watch_mode": "both",
+            "ogm_has_aardvark": True,
+        },
+        {"ogm_repo_name": "archived-source", "ogm_enabled": True, "ogm_archived": True},
+        {"ogm_repo_name": "disabled-source", "ogm_enabled": False},
+        {"ogm_repo_name": "failed-source", "ogm_enabled": True, "last_crawl_status": "failed"},
+    ]
+    with (
+        patch.object(ogm.ogm_repo, "list_public_repo_summaries", AsyncMock(return_value=repos)),
+        patch.object(
+            ogm, "get_index_status", AsyncMock(return_value={"record_count": 0, "repo_counts": {}})
+        ),
+        patch.object(ogm, "templates", None if fallback else ogm.templates),
+    ):
+        response = client.get("/api/v1/ogm/repos/dashboard")
+    assert response.status_code == 200
+    assert "gov.usgs.tnm" in response.text
+    assert "Awaiting first harvest" in response.text
+    assert "failed-source" in response.text
+    assert "failed" in response.text.lower()
+    assert "archived-source" not in response.text
+    assert "disabled-source" not in response.text
