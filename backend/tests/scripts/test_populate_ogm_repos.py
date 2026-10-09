@@ -20,6 +20,37 @@ def setup_function():
     populate_ogm_repos._REJECTED_GITHUB_TOKENS.clear()
 
 
+@pytest.mark.parametrize("name,suffix", [("ca.lunaris", ""), ("edu.example", "/metadata-aardvark")])
+def test_discovery_uses_supported_metadata_root(monkeypatch, name, suffix):
+    def fake_get(url, token, params, timeout):
+        assert url == f"https://api.github.com/repos/OpenGeoMetadata/{name}/contents{suffix}"
+        assert params == {"ref": "master"}
+        return FakeResponse(200, [{"name": "provider", "type": "dir"}])
+
+    monkeypatch.setattr(populate_ogm_repos, "_github_get", fake_get)
+    has_aardvark = populate_ogm_repos.repo_has_metadata_aardvark(
+        "OpenGeoMetadata", name, "master", None
+    )
+    row = populate_ogm_repos.build_repo_row(
+        {"name": name, "archived": False}, has_aardvark=has_aardvark
+    )
+    assert row["ogm_enabled"] is True
+    assert row["ogm_watch_mode"] == "both"
+
+
+def test_missing_standard_directory_remains_disabled(monkeypatch):
+    monkeypatch.setattr(populate_ogm_repos, "_github_get", lambda *a, **kw: FakeResponse(404, {}))
+    has_aardvark = populate_ogm_repos.repo_has_metadata_aardvark(
+        "OpenGeoMetadata", "utility", "main", None
+    )
+    assert (
+        populate_ogm_repos.build_repo_row({"name": "utility"}, has_aardvark=has_aardvark)[
+            "ogm_enabled"
+        ]
+        is False
+    )
+
+
 def test_list_org_repos_retries_without_rejected_token(monkeypatch, capsys):
     responses = [
         FakeResponse(401, {"message": "Bad credentials"}),

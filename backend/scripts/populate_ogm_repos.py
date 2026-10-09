@@ -6,7 +6,7 @@ Source of truth: https://github.com/OpenGeoMetadata
 
 This script:
 - lists repos in a GitHub org via the REST API
-- checks whether each repo has a top-level `metadata-aardvark/` directory
+- checks whether each repo has its supported metadata directory
 - upserts into Postgres table `ogm_repos`
 - flags repos missing aardvark via `ogm_tags["ogm_missing_aardvark"] = true`
 
@@ -28,6 +28,8 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from app.services.ogm_harvest.layout import metadata_root
 
 # Keep script self-contained: import the SQLAlchemy Table definitions.
 from db.models import ogm_repos
@@ -119,7 +121,9 @@ def repo_has_metadata_aardvark(
     org: str, repo_name: str, default_branch: Optional[str], token: Optional[str]
 ) -> bool:
     # GitHub contents API for a directory returns a JSON array (200) if present, 404 if missing.
-    url = f"https://api.github.com/repos/{org}/{repo_name}/contents/metadata-aardvark"
+    root = metadata_root(repo_name)
+    suffix = "" if root == "." else f"/{root}"
+    url = f"https://api.github.com/repos/{org}/{repo_name}/contents{suffix}"
     params = {}
     if default_branch:
         params["ref"] = default_branch
@@ -131,7 +135,7 @@ def repo_has_metadata_aardvark(
         return False
     # Treat other errors as non-fatal but recordable upstream; caller can decide.
     raise RuntimeError(
-        f"GitHub API error checking metadata-aardvark for {org}/{repo_name}: "
+        f"GitHub API error checking metadata root {root} for {org}/{repo_name}: "
         f"{resp.status_code} {resp.text[:500]}"
     )
 
@@ -155,7 +159,7 @@ def build_repo_row(repo: Dict[str, Any], *, has_aardvark: bool) -> Dict[str, Any
     }
 
     # Policy:
-    # - if no aardvark directory, disable by default (so it won't be harvested)
+    # - if no supported metadata directory, disable by default
     # - otherwise enable and default to both webhook + nightly reconciliation
     #   (can be edited via admin endpoint)
     ogm_enabled = bool(has_aardvark and not archived)
