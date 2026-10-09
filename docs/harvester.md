@@ -64,6 +64,13 @@ The harvester denylist automatically excludes non-metadata repositories such as 
 
 ## Related Backend Flows
 
+Application discovery and harvesting share explicit metadata locations. Most
+repositories use `metadata-aardvark/`; `ca.lunaris` uses the repository root with
+records nested under provider directories. For that root layout, the reader
+accepts only records declaring `gbl_mdVersion_s: Aardvark` and skips hidden paths
+and `layers.json`. After deploying this support, the next repository discovery
+refresh enables Lunaris and the nightly pipeline harvests its records.
+
 For the full application workflow, these backend scripts usually matter more than the standalone harvester:
 
 - `scripts/populate_ogm_repos.py`
