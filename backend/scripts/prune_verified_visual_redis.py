@@ -39,20 +39,22 @@ def prune(manifest, *, apply=False):
         socket_timeout=30,
         socket_connect_timeout=5,
     )
-    scanned = matched = removed = retained = released_bytes = 0
+    scanned = matched = removed = retained = released_bytes = eligible_bytes = retained_bytes = 0
     pending = []
 
     def batch(keys):
-        nonlocal scanned, matched, removed, retained, released_bytes
+        nonlocal scanned, matched, removed, retained, released_bytes, eligible_bytes, retained_bytes
         values = cache.mget(keys)
         selected = []
         for key, value in zip(keys, values):
             scanned += 1
             if is_verified_image(key, value, verified):
                 matched += 1
+                eligible_bytes += len(value)
                 selected.append((key, value))
             else:
                 retained += 1
+                retained_bytes += len(value) if value else 0
         if apply and selected:
             pipe = cache.pipeline(transaction=False)
             for key, value in selected:
@@ -89,6 +91,8 @@ def prune(manifest, *, apply=False):
         removed=removed,
         retained=retained,
         released_bytes=released_bytes,
+        eligible_bytes=eligible_bytes,
+        retained_bytes=retained_bytes,
         dry_run=not apply,
         redis_db=1,
     )

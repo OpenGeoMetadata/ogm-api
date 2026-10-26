@@ -11,7 +11,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import Text, cast, func, literal_column, or_, select, update
 
 from app.services.visual_asset_object_store import client, read_visual_asset
 from db.models import generated_visual_assets as assets
@@ -37,6 +37,11 @@ def verified_record(row):
 def clear_verified_body(conn, row):
     if row["body"] is None:
         return 0
+    unchanged = (
+        cast(literal_column("xmin"), Text) == row["_row_version"]
+        if "_row_version" in row
+        else assets.c.body == bytes(row["body"])
+    )
     return conn.execute(
         update(assets)
         .where(
@@ -44,7 +49,8 @@ def clear_verified_body(conn, row):
             assets.c.object_key == row["object_key"],
             assets.c.object_sha256 == row["object_sha256"],
             assets.c.byte_size == row["byte_size"],
-            assets.c.body == bytes(row["body"]),
+            assets.c.body.is_not(None),
+            unchanged,
         )
         .values(body=None)
     ).rowcount
@@ -61,8 +67,13 @@ def verify(*, manifest, prune=False, workers=8, limit=1000000, after=""):
         if missing:
             raise RuntimeError(f"Refusing cleanup: {missing} assets lack object pointers")
     client()  # Construct the SDK client before starting verification threads.
-    verified = cleared = released_bytes = 0
+    verified = cleared = released_bytes = reported = 0
     cursor = after
+    columns = [assets]
+    if sync_engine.dialect.name == "postgresql":
+        # xmin changes on every concurrent UPDATE, including body-only updates.
+        # Avoid shipping every large image back in the cleanup WHERE clause.
+        columns.append(cast(literal_column("xmin"), Text).label("_row_version"))
     os.umask(0o077)
     with (
         open(manifest, "a", encoding="utf-8") as audit,
@@ -72,7 +83,7 @@ def verify(*, manifest, prune=False, workers=8, limit=1000000, after=""):
             with sync_engine.connect() as conn:
                 rows = (
                     conn.execute(
-                        select(assets)
+                        select(*columns)
                         .where(assets.c.asset_hash > cursor)
                         .order_by(assets.c.asset_hash)
                         .limit(min(max(25, workers * 2), limit - verified))
@@ -95,7 +106,8 @@ def verify(*, manifest, prune=False, workers=8, limit=1000000, after=""):
                         released_bytes += changed * row["byte_size"]
             verified += len(rows)
             cursor = rows[-1]["asset_hash"]
-            if verified % 500 == 0:
+            if verified - reported >= 500:
+                reported = verified
                 print(
                     json.dumps(
                         {

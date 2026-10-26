@@ -69,10 +69,20 @@ The copy-only utility bounds concurrency and shares a verified upload among rows
 
 Before cleanup, export the schema, generated asset metadata (excluding bodies), and resource links to a protected directory and copy them off the production host. Never place these backups in the public bucket. Switch all running application roles to `VISUAL_ASSET_S3_RETAIN_DATABASE_BODY=false` and stop dual-write canaries.
 
-Run `verify_visual_assets_r2.py --manifest /protected/verified.jsonl --prune-postgres --workers 64` with the production environment. It refuses pruning while any pointer is missing, GETs and checksum-verifies every remote image, compares the existing local bytes, and fsyncs the audit manifest before each bounded cleanup transaction. Conditional updates protect concurrent changes. Metadata and resource links remain.
+Run `verify_visual_assets_r2.py --manifest /protected/verified.jsonl --prune-postgres --workers 64` with the production environment. It refuses pruning while any pointer is missing, GETs and checksum-verifies every remote image, compares the existing local bytes, and fsyncs the audit manifest before each bounded cleanup transaction. Conditional updates protect concurrent changes. PostgreSQL uses the observed `xmin` row version, so even a concurrent body-only update prevents deletion without resending large image bodies in SQL; other database backends use byte equality. This guard was verified against a real concurrent update in an isolated PostgreSQL 15 instance. Metadata and resource links remain.
 
 Then run `prune_verified_visual_redis.py --manifest /protected/verified.jsonl` for a dry run; add `--apply` after reviewing the counts. It touches only known binary image namespaces in DB 1 whose bytes match a verified object digest and size. Lua compare-and-UNLINK preserves values changed concurrently. It leaves broker queues, task results, image types, aliases, and unmatched data untouched.
 
 Check filesystem headroom before ordinary PostgreSQL VACUUM and Redis persistence compaction. Run BGSAVE and BGREWRITEAOF one at a time and confirm persistence status before proceeding. Record actual filesystem space recovered, separately from logical body bytes released.
 
 During DNS propagation, the old Porkbun zone also has an `assets` A record at `104.21.18.253` (TTL 600), matching Cloudflare's active edge. Cloudflare remains authoritative; this compatibility record serves clients with a cached old delegation.
+
+## Production verification updates (2026-10-26)
+
+The final application configuration was deployed to worker, web, and cron from `71c0b184532b4e2fd4a64ca3abcac005384d6ed7`. A newly generated Indiana campus map (zoom 14, 640×320, 170141 bytes) returned HTTP 200 through the public asset domain with SHA-256 `7387541d7b960d5cf14d0478b0392ac45a0175534a1b67f223d52239081c2a70`; its PostgreSQL body is NULL. The private dual-write canary is stopped.
+
+Cloudflare configuration rule `OGM public asset client compatibility` (`a6599194233844b0845e50dbc607463c`) disables only Browser Integrity Check for GET/HEAD on `assets.geo4lib.app` under `/assets/`. This approved exception fixes Cloudflare error 1010 for Python urllib downloads. Other hosts, paths, methods, and security settings are unchanged; the urllib request was verified afterward.
+
+Release PR #25 passed all three GitHub checks, including 2014 passed, 82 skipped, and 1 xpassed backend tests. The production asset copy and subsequent cleanup are tracked separately from application deployment.
+
+During the 2026-10-26 cleanup, Redis's automatic snapshot temporarily required a second ~15 GB file. It completed successfully. Maintenance then temporarily set runtime `save` to an empty string while retaining the fresh RDB and healthy AOF (`appendfsync everysec`). Restore `CONFIG SET save "3600 1 300 100 60 10000"` after compaction; do not leave the maintenance override in place. No persistent configuration rewrite was made.
