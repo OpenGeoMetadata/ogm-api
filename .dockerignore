@@ -40,3 +40,5 @@ backend/data/fixtures/*
 backend/data/gazetteers/*
 backend/data/opengeometadata/*
 backend/data/harvest_dumps/*
+
+.kamal/

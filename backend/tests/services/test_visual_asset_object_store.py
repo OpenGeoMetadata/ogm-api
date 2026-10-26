@@ -3,6 +3,7 @@ import io
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from app.services import visual_asset_cache as cache
 from app.services import visual_asset_object_store as objects
@@ -23,18 +24,23 @@ def test_upload_uses_actual_bytes_and_verifies_before_returning():
     body = b"generated image"
     digest = hashlib.sha256(body).hexdigest()
     s3 = MagicMock()
-    s3.head_object.return_value = {
-        "ContentLength": len(body),
-        "ContentType": "image/png",
-        "Metadata": {"sha256": digest},
-    }
+    s3.head_object.side_effect = [
+        ClientError(
+            {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject"
+        ),
+        {
+            "ContentLength": len(body),
+            "ContentType": "image/png",
+            "Metadata": {"sha256": digest},
+        },
+    ]
     with patch.object(objects, "client", return_value=s3):
         assert objects.upload_visual_asset(body, "image/png") == (f"assets/{digest}", digest)
     args = s3.put_object.call_args.kwargs
     assert args["Body"] == body
     assert args["ContentMD5"]
     assert args["CacheControl"] == "public, max-age=31536000, immutable"
-    s3.head_object.assert_called_once_with(Bucket="test-images", Key=f"assets/{digest}")
+    assert s3.head_object.call_count == 2
 
 
 def test_incomplete_upload_is_not_published():
@@ -194,3 +200,28 @@ async def test_asset_endpoints_redirect_before_loading_bytes(kind):
     assert response.status_code == 302
     assert response.headers["location"] == "https://assets.example.org/assets/hash"
     service.assert_not_called()
+
+
+def test_existing_verified_object_is_reused_without_put():
+    body = b"shared icon"
+    digest = hashlib.sha256(body).hexdigest()
+    s3 = MagicMock()
+    s3.head_object.return_value = {
+        "ContentLength": len(body),
+        "ContentType": "image/png",
+        "Metadata": {"sha256": digest},
+    }
+    with patch.object(objects, "client", return_value=s3):
+        assert objects.upload_visual_asset(body, "image/png") == (f"assets/{digest}", digest)
+    s3.put_object.assert_not_called()
+
+
+def test_head_permission_error_is_not_treated_as_missing():
+    s3 = MagicMock()
+    s3.head_object.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+        "HeadObject",
+    )
+    with patch.object(objects, "client", return_value=s3), pytest.raises(ClientError):
+        objects.upload_visual_asset(b"image", "image/png")
+    s3.put_object.assert_not_called()

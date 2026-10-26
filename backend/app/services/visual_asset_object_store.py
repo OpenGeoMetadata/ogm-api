@@ -8,6 +8,7 @@ from urllib.parse import quote, urlsplit
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 
 def s3_visual_assets_enabled() -> bool:
@@ -27,7 +28,7 @@ def _client(process_id: int):
     endpoint = _required("VISUAL_ASSET_S3_ENDPOINT")
     if urlsplit(endpoint).scheme != "https":
         raise ValueError("Visual object storage requires an HTTPS endpoint")
-    return boto3.client(
+    return boto3.session.Session().client(
         "s3",
         endpoint_url=endpoint,
         region_name=os.getenv("VISUAL_ASSET_S3_REGION", "auto"),
@@ -37,6 +38,7 @@ def _client(process_id: int):
             signature_version="s3v4",
             connect_timeout=5,
             read_timeout=20,
+            max_pool_connections=128,
             retries={"total_max_attempts": 3, "mode": "standard"},
             s3={"addressing_style": "path"},
             request_checksum_calculation="when_required",
@@ -67,7 +69,22 @@ def upload_visual_asset(body: bytes, content_type: str) -> tuple[str, str]:
     key, digest = object_key_for_body(body)
     s3 = client()
     name = bucket()
-    # Repeated uploads have identical bytes and keys, including concurrent renders.
+    # Content-addressed images are immutable. Reuse existing objects rather than
+    # rewriting common icons and maps (R2 limits repeated writes to one key).
+    try:
+        existing = s3.head_object(Bucket=name, Key=key)
+    except ClientError as exc:
+        # HEAD has no modeled NoSuchKey response; only an actual 404 is a miss.
+        if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
+            raise
+    else:
+        if (
+            existing["ContentLength"] != len(body)
+            or existing.get("Metadata", {}).get("sha256") != digest
+            or existing.get("ContentType") != content_type
+        ):
+            raise RuntimeError("Existing visual asset metadata verification failed")
+        return key, digest
     s3.put_object(
         Bucket=name,
         Key=key,

@@ -83,3 +83,37 @@ def test_concurrent_render_is_not_replaced_with_stale_pointer(database):
     assert result["copied"] == 0
     assert row(database)["object_key"] is None
     assert row(database)["body"] == b"new image"
+
+
+def test_parallel_copy_keeps_all_rows_and_commits_each_pointer(tmp_path, monkeypatch):
+    engine = create_engine("sqlite:///" + str(tmp_path / "assets.sqlite"))
+    assets.create(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            assets.insert(),
+            [
+                dict(
+                    asset_hash=f"{n:064x}",
+                    asset_kind="thumbnail",
+                    content_type="image/png",
+                    body=b"image",
+                    byte_size=5,
+                )
+                for n in range(80)
+            ],
+        )
+    monkeypatch.setattr(migration, "sync_engine", engine)
+    with (
+        patch.object(
+            migration, "upload_visual_asset", return_value=("assets/digest", "d" * 64)
+        ) as upload,
+        patch.object(migration, "read_visual_asset", return_value=b"image"),
+    ):
+        result = migration.backfill(apply=True, limit=100, workers=4)
+    upload.assert_called_once()
+    assert result["copied"] == 80
+    assert result["scanned"] == 80
+    with engine.connect() as conn:
+        rows = conn.execute(select(assets)).mappings().all()
+        assert all(r["object_key"] == "assets/digest" and r["body"] == b"image" for r in rows)
+    engine.dispose()

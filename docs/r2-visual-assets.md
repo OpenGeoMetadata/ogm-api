@@ -15,7 +15,7 @@ The optional `s3`/`r2` visual store puts generated image bytes in object storage
 
 Verified on 2026-10-26: registry delegation points to Cloudflare, the zone and R2 custom domain are active, and the production API docs still return HTTP 200. Cache rule `OGM immutable visual assets` is active for the asset hostname and `/assets/` prefix only. It respects origin Cache-Control, bypasses cache when that header is absent, and does not store HTTP status codes 400 or higher. A 75-byte PNG passed authenticated PUT/GET checksum verification and public HTTPS GET with CORS, one-year immutable Cache-Control, and `CF-Cache-Status: HIT`. Local DNS caches may temporarily retain the earlier negative lookup.
 
-Application rollout status: implemented locally, not deployed; production schema and existing image bodies are unchanged. Validation: 89 focused tests passed; the additive migration was also run repeatedly against an isolated PostgreSQL 15 instance, preserving old bytes and accepting object-only rows. The temporary database container was removed after verification.
+Application rollout: MapLibre and R2 were deployed on 2026-10-26 from isolated production-based commit `652922f3`. Native campus and resource maps passed public HTTPS, dimensions, SHA-256, attribution, and cold-cache checks. Historical asset copying is in progress; original bodies remain intact until the separate verification pass. Validation: 89 focused tests passed; the additive migration was also run repeatedly against an isolated PostgreSQL 15 instance, preserving old bytes and accepting object-only rows. The temporary database container was removed after verification.
 
 ## Release order
 
@@ -47,7 +47,7 @@ Application rollout status: implemented locally, not deployed; production schema
    ```
 
    Dry-run is the default. Apply uploads each image, GETs and checks actual bytes, and conditionally commits a pointer only if the source body is unchanged. Re-running skips rows already copied. Use the returned `last_hash` with `--after` for paging; run again without a cursor at the end to catch concurrent changes. No bodies are removed. A failure is safe to retry, though it may leave an unreferenced immutable object.
-8. After the pilot and a successful nightly run, set `VISUAL_ASSET_S3_RETAIN_DATABASE_BODY=false` to stop retaining bytes on new writes. Do not remove historical database bytes or Redis keys as part of deployment; those need a separately reviewed inventory and reclaim procedure.
+8. After the production pilot passes, set `VISUAL_ASSET_S3_RETAIN_DATABASE_BODY=false` to stop retaining bytes on new writes. Remove historical bodies only through the checksum-gated procedure below, after all rows have durable pointers.
 
 ## Retention and disk headroom
 
@@ -62,3 +62,17 @@ Removing PostgreSQL bytea values creates reusable database space but does not gu
 During the dual-write pilot, clear `VISUAL_ASSET_PUBLIC_BASE_URL` to stop redirects; set the durable store back to `database` only while every needed body is still present. Once any body is null, keep S3 reads enabled or restore those bytes before database-only rollback. Do not repoint the configured bucket or endpoint: persisted keys assume the same object store. Disabling redirects cannot instantly retract already cached immutable objects.
 
 For DNS rollback, Porkbun's previous nameservers were `curitiba.ns.porkbun.com`, `fortaleza.ns.porkbun.com`, `maceio.ns.porkbun.com`, and `salvador.ns.porkbun.com`; the original records were retained there. Nameserver rollback also propagates gradually.
+
+## Verified cleanup procedure
+
+The copy-only utility bounds concurrency and shares a verified upload among rows with identical bytes. After a failed run, resume without `--after` so unfinished rows are included. Original bodies are retained.
+
+Before cleanup, export the schema, generated asset metadata (excluding bodies), and resource links to a protected directory and copy them off the production host. Never place these backups in the public bucket. Switch all running application roles to `VISUAL_ASSET_S3_RETAIN_DATABASE_BODY=false` and stop dual-write canaries.
+
+Run `verify_visual_assets_r2.py --manifest /protected/verified.jsonl --prune-postgres --workers 64` with the production environment. It refuses pruning while any pointer is missing, GETs and checksum-verifies every remote image, compares the existing local bytes, and fsyncs the audit manifest before each bounded cleanup transaction. Conditional updates protect concurrent changes. Metadata and resource links remain.
+
+Then run `prune_verified_visual_redis.py --manifest /protected/verified.jsonl` for a dry run; add `--apply` after reviewing the counts. It touches only known binary image namespaces in DB 1 whose bytes match a verified object digest and size. Lua compare-and-UNLINK preserves values changed concurrently. It leaves broker queues, task results, image types, aliases, and unmatched data untouched.
+
+Check filesystem headroom before ordinary PostgreSQL VACUUM and Redis persistence compaction. Run BGSAVE and BGREWRITEAOF one at a time and confirm persistence status before proceeding. Record actual filesystem space recovered, separately from logical body bytes released.
+
+During DNS propagation, the old Porkbun zone also has an `assets` A record at `104.21.18.253` (TTL 600), matching Cloudflare's active edge. Cloudflare remains authoritative; this compatibility record serves clients with a cached old delegation.
