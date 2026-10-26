@@ -4,6 +4,9 @@ import argparse
 import hashlib
 from threading import Lock
 import json
+import random
+import time
+from botocore.exceptions import ClientError
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from sqlalchemy import select, update
@@ -29,7 +32,15 @@ class VerifiedCopies:
                 future = self.copies[identity] = Future()
         if owner:
             try:
-                key, digest = upload_visual_asset(body, content_type)
+                for attempt in range(6):
+                    try:
+                        key, digest = upload_visual_asset(body, content_type)
+                        break
+                    except ClientError as exc:
+                        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                        if status not in (429, 500, 502, 503, 504) or attempt == 5:
+                            raise
+                        time.sleep(2**attempt + random.random())
                 read_visual_asset(key, digest, len(body))
                 future.set_result((key, digest))
             except Exception as exc:
