@@ -45,6 +45,7 @@ def create_static_map_service_mock(*, basemap_bytes=None, geometry_bytes=None) -
     svc.get_cached_basemap = AsyncMock(return_value=basemap_bytes)
     svc.get_cached_map = AsyncMock(return_value=geometry_bytes)
     svc.get_cached_asset = AsyncMock(return_value=None)
+    svc.get_asset_hash = AsyncMock(return_value=None)
     svc.basemap_variant.return_value = "basemap"
     svc.geometry_variant.return_value = "geometry"
     svc.geometry_signature.return_value = "geometry-signature"

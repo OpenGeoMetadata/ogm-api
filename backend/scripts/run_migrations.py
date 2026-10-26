@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 
 from db.migrations.add_enrichment_type import add_enrichment_type_column
 from db.migrations.add_fast_gazetteer import add_fast_gazetteer
+from db.migrations.add_visual_asset_object_storage import add_visual_asset_object_storage
 from db.migrations.api_rate_limiting import init_api_rate_limiting
 from db.migrations.backfill_resources_from_legacy_items import (
     backfill_resources_from_legacy_items,
@@ -70,6 +71,7 @@ def run_migrations():
 
         logger.info("Creating generated visual asset cache tables...")
         create_generated_visual_assets_table()
+        add_visual_asset_object_storage()
 
         logger.info("Creating resource thumbnail state table...")
         create_resource_thumbnail_state_table()
