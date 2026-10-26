@@ -117,3 +117,23 @@ def test_parallel_copy_keeps_all_rows_and_commits_each_pointer(tmp_path, monkeyp
         rows = conn.execute(select(assets)).mappings().all()
         assert all(r["object_key"] == "assets/digest" and r["body"] == b"image" for r in rows)
     engine.dispose()
+
+
+def test_transient_upload_failure_retries_without_committing_early(database):
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {"Error": {"Code": "ServiceUnavailable"}, "ResponseMetadata": {"HTTPStatusCode": 503}},
+        "PutObject",
+    )
+    with (
+        patch.object(
+            migration, "upload_visual_asset", side_effect=[error, ("assets/hash", "d" * 64)]
+        ) as upload,
+        patch.object(migration, "read_visual_asset", return_value=b"original"),
+        patch.object(migration.time, "sleep") as sleep,
+    ):
+        assert migration.backfill(apply=True)["copied"] == 1
+    assert upload.call_count == 2
+    sleep.assert_called_once()
+    assert row(database)["body"] == b"original"

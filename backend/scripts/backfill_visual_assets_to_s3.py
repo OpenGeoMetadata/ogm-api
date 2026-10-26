@@ -2,13 +2,13 @@
 
 import argparse
 import hashlib
-from threading import Lock
 import json
 import random
 import time
-from botocore.exceptions import ClientError
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from threading import Lock
 
+from botocore.exceptions import ClientError
 from sqlalchemy import select, update
 
 from app.services.visual_asset_object_store import read_visual_asset, upload_visual_asset

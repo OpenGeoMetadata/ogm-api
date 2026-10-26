@@ -60,3 +60,35 @@ def test_redis_cleanup_requires_known_namespace_and_verified_exact_bytes():
     assert not is_verified_image(b"celery-task-meta-id", b"image", manifest)
     assert not is_verified_image(b"image_type:hash", b"image", manifest)
     assert not is_verified_image(b"image:hash", b"other", manifest)
+
+
+def test_audit_flush_failure_prevents_cleanup(tmp_path, monkeypatch):
+    engine = create_engine("sqlite://")
+    assets.create(engine)
+    with engine.begin() as conn:
+        conn.execute(assets.insert().values(**sample()))
+    monkeypatch.setattr(cleanup, "sync_engine", engine)
+    with (
+        patch.object(cleanup, "client"),
+        patch.object(cleanup, "read_visual_asset", return_value=b"image"),
+        patch.object(cleanup.os, "fsync", side_effect=OSError("audit disk full")),
+        pytest.raises(OSError, match="audit disk full"),
+    ):
+        cleanup.verify(manifest=str(tmp_path / "audit.jsonl"), prune=True, workers=1)
+    with engine.connect() as conn:
+        assert conn.execute(select(assets.c.body)).scalar_one() == b"image"
+    engine.dispose()
+
+
+def test_pruning_refuses_any_missing_object_pointer(tmp_path, monkeypatch):
+    engine = create_engine("sqlite://")
+    assets.create(engine)
+    row = sample()
+    row["object_key"] = None
+    with engine.begin() as conn:
+        conn.execute(assets.insert().values(**row))
+    monkeypatch.setattr(cleanup, "sync_engine", engine)
+    with pytest.raises(RuntimeError, match="lack object pointers"):
+        cleanup.verify(manifest=str(tmp_path / "audit.jsonl"), prune=True, workers=1)
+    assert not (tmp_path / "audit.jsonl").exists()
+    engine.dispose()
