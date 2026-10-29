@@ -1,3 +1,4 @@
+.env.r2.local
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

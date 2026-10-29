@@ -1,8 +1,10 @@
+import asyncio
 import io
 import logging
 import os
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from PIL import Image
 from sqlalchemy.sql import select
@@ -15,6 +17,7 @@ from app.services.cache_service import (
     weak_etag_from_body,
 )
 from app.services.static_map_service import StaticMapService
+from app.services.visual_asset_cache import get_visual_asset_public_url
 from db.models import resources
 
 logger = logging.getLogger(__name__)
@@ -203,15 +206,29 @@ async def _get_or_generate_map_data(
     raise HTTPException(status_code=400, detail="Unsupported static map variant")
 
 
+@router.get("/static-maps/institutions/{map_id}/native", response_class=Response)
 @router.get("/static-maps/institutions/{map_id}", response_class=Response)
 async def get_institution_static_map(
     map_id: str,
     request: Request,
-    lat: float,
-    lon: float,
-    zoom: int = 15,
+    lat: float = Query(..., ge=-85, le=85),
+    lon: float = Query(..., ge=-180, le=180),
+    zoom: int = Query(15, ge=1, le=20),
+    renderer: str | None = None,
 ):
     """Serve or generate a cached campus-centered static basemap image."""
+    from app.services.native_static_maps import renderer_url
+
+    if request.url.path.endswith("/native"):
+        renderer = "maplibre"
+    if renderer not in (None, "maplibre"):
+        raise HTTPException(status_code=422, detail="Unknown renderer")
+    if renderer == "maplibre" and not renderer_url():
+        raise HTTPException(
+            status_code=503,
+            detail="Native renderer is not configured",
+            headers={"Cache-Control": "no-store", "Retry-After": "30"},
+        )
     cache_id = f"institution:{map_id}"
     try:
         map_service = StaticMapService(map_width=640, map_height=320)
@@ -220,10 +237,50 @@ async def get_institution_static_map(
             longitude=lon,
             zoom=zoom,
         )
+        digest = await map_service.get_asset_hash(
+            cache_id,
+            variant=map_service.basemap_variant(),
+            source_signature=source_signature,
+            hydrate_asset=False,
+        )
+        if digest:
+            url = await asyncio.to_thread(get_visual_asset_public_url, digest)
+            if url:
+                return Response(
+                    status_code=302,
+                    headers={"Location": url, "Cache-Control": "public, max-age=300"},
+                )
+            durable_data = await map_service.get_cached_asset(digest)
+            if durable_data:
+                return _validated_static_asset_response(
+                    durable_data,
+                    request,
+                    cache_control="public, max-age=3600, stale-while-revalidate=86400",
+                )
         map_data = await map_service.get_cached_basemap(
             cache_id,
             source_signature=source_signature,
         )
+        if not map_data and renderer_url():
+            from app.tasks.worker import celery_app
+
+            lock_key = f"native-campus-pending:{map_id}:{source_signature}"
+            acquired = await asyncio.to_thread(
+                map_service.map_cache.set, lock_key, "pending", nx=True, ex=300
+            )
+            if acquired:
+                try:
+                    await asyncio.to_thread(
+                        celery_app.send_task,
+                        "generate_campus_static_map",
+                        args=[map_id, lat, lon, zoom, lock_key],
+                    )
+                except Exception:
+                    await asyncio.to_thread(map_service.map_cache.delete, lock_key)
+                    raise
+            return Response(
+                status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "2"}
+            )
         if not map_data:
             map_data = map_service.generate_centered_basemap(
                 cache_id,
@@ -239,12 +296,19 @@ async def get_institution_static_map(
     if not map_data:
         raise HTTPException(status_code=404, detail="Institution static map not found")
 
-    return _validated_static_asset_response(map_data, request)
+    return _validated_static_asset_response(
+        map_data, request, cache_control="public, max-age=3600, stale-while-revalidate=86400"
+    )
 
 
 @router.get("/static-map-assets/{map_hash}", response_class=Response)
 async def get_static_map_asset(map_hash: str, request: Request):
-    """Serve a hash-addressed immutable static map or icon asset directly from Redis."""
+    """Serve a durable static map, preferring its verified CDN object."""
+    url = await asyncio.to_thread(get_visual_asset_public_url, map_hash)
+    if url:
+        return Response(
+            status_code=302, headers={"Location": url, "Cache-Control": "public, max-age=300"}
+        )
     map_service = StaticMapService()
     map_data = await map_service.get_cached_asset(map_hash)
     if not map_data:
@@ -401,3 +465,62 @@ async def get_static_map(resource_id: str, request: Request):
         raise HTTPException(status_code=500, detail="Failed to retrieve static map") from e
 
     return _validated_static_asset_response(map_data, request)
+
+
+@router.get("/static-maps/{resource_id}/geometry/native", response_class=Response)
+async def get_native_resource_geometry(
+    resource_id: str, request: Request, size: Literal["full", "thumbnail"] = "full"
+):
+    """Versioned native geography; never reuse legacy CARTO hashes or aliases."""
+    from app.services.native_static_maps import renderer_url
+    from app.tasks.worker import celery_app
+
+    if not renderer_url():
+        raise HTTPException(
+            status_code=503,
+            detail="Native renderer is not configured",
+            headers={"Cache-Control": "no-store", "Retry-After": "30"},
+        )
+    resource = await _fetch_resource_dict(resource_id)
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found")
+    service = StaticMapService(384, 288) if size == "thumbnail" else StaticMapService()
+    geometry = _resource_geometry(resource)
+    signature = service.geometry_signature(geometry)
+    digest = await service.get_asset_hash(
+        resource_id,
+        variant=service.geometry_variant(),
+        source_signature=signature,
+        hydrate_asset=False,
+    )
+    if digest:
+        url = await asyncio.to_thread(get_visual_asset_public_url, digest)
+        if url:
+            return Response(
+                status_code=302, headers={"Location": url, "Cache-Control": "public, max-age=300"}
+            )
+        data = await service.get_cached_asset(digest)
+        if data:
+            return _validated_static_asset_response(
+                data, request, cache_control="public, max-age=3600, stale-while-revalidate=86400"
+            )
+    from app.services.native_static_maps import reuse_geometry
+
+    data = await asyncio.to_thread(reuse_geometry, service, resource_id, geometry)
+    if data:
+        return _validated_static_asset_response(
+            data, request, cache_control="public, max-age=3600, stale-while-revalidate=86400"
+        )
+    lock_key = f"native-resource-pending:{resource_id}:{signature}"
+    acquired = await asyncio.to_thread(service.map_cache.set, lock_key, "pending", nx=True, ex=600)
+    if acquired:
+        try:
+            await asyncio.to_thread(
+                celery_app.send_task,
+                "generate_native_resource_map",
+                args=[resource_id, geometry, lock_key, service.map_width, service.map_height],
+            )
+        except Exception:
+            await asyncio.to_thread(service.map_cache.delete, lock_key)
+            raise
+    return Response(status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "2"})
