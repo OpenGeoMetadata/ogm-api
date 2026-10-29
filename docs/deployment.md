@@ -815,6 +815,20 @@ search synchronization with zero indexing errors. Failures and a five-hour wait
 timeout fail the workflow. The existing concurrency group prevents overlapping
 workflow runs while their harvests are being monitored.
 
+Before queueing a harvest, CI streams `backend/scripts/check_ogm_sync_capacity.py`
+to the host's Python 3 interpreter. This read-only check requires at least 15%
+available space on the root filesystem and every reported Elasticsearch data
+filesystem, and rejects write/read-only/metadata blocks on `opengeometadata_api`.
+The host reserve is about 65 GiB on the current 436 GiB shared disk. A green
+Elasticsearch cluster does not imply it accepts writes. The preflight checks
+actual index settings and fails closed if Elasticsearch cannot be inspected.
+It needs no application image deployment and does not clear blocks or delete data.
+
+The shared host also runs Wherehence. Keep inactive build/run evidence off-host
+with verified archive receipts; do not delete live database directories or raise
+Elasticsearch watermarks to accommodate growth. The guard reports insufficient
+capacity early; it cannot reserve space against unrelated jobs that start later.
+
 Deploy the updated trigger and wait scripts before running the updated workflow.
 Container-based nightly cron remains disabled to avoid a second scheduler.
 The repository dashboard lists sources with records in Elasticsearch, using live
