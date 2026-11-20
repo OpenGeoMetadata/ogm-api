@@ -6,4 +6,6 @@ def metadata_root(repo_name: str) -> str:
     # Keep this explicit: scanning arbitrary utility repos would ingest fixtures.
     if repo_name == "ca.lunaris":
         return "."
+    if repo_name == "edu.harvard":
+        return "ogm-aardvark"
     return "metadata-aardvark"

@@ -46,3 +46,13 @@ def test_unknown_repo_does_not_fall_back_to_root(tmp_path):
     repo = tmp_path / "utility"
     write_json(repo, "fixtures/record.json", {"id": "fixture", "gbl_mdVersion_s": "Aardvark"})
     assert list(read_aardvark_records(repo)) == []
+
+
+def test_harvard_reads_only_its_discovery_metadata(tmp_path):
+    repo = tmp_path / "edu.harvard"
+    record = {"id": "harvard-layer", "gbl_mdVersion_s": "Aardvark"}
+    write_json(repo, "ogm-aardvark/hgl/record.json", record)
+    write_json(repo, "index-maps-aardvark/map.json", {"id": "separate-index-map"})
+    refs = list(read_aardvark_records(repo))
+    assert [ref.record for ref in refs] == [record]
+    assert refs[0].source_path == "ogm-aardvark/hgl/record.json"
