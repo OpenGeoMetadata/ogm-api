@@ -20,7 +20,10 @@ def setup_function():
     populate_ogm_repos._REJECTED_GITHUB_TOKENS.clear()
 
 
-@pytest.mark.parametrize("name,suffix", [("ca.lunaris", ""), ("edu.example", "/metadata-aardvark")])
+@pytest.mark.parametrize(
+    "name,suffix",
+    [("ca.lunaris", ""), ("edu.harvard", "/ogm-aardvark"), ("edu.example", "/metadata-aardvark")],
+)
 def test_discovery_uses_supported_metadata_root(monkeypatch, name, suffix):
     def fake_get(url, token, params, timeout):
         assert url == f"https://api.github.com/repos/OpenGeoMetadata/{name}/contents{suffix}"
