@@ -1,0 +1,9 @@
+# Preserve the exact deployed runtime; layer the reviewed visual-asset source onto it.
+FROM ghcr.io/ewlarson/opengeometadata-api@sha256:eeff5bbf7d415903c6f1fdcba02ee97d7303521ab9323687ee834f6d5566ef8b
+RUN uv pip install --system --no-cache boto3==1.43.119 botocore==1.43.119 s3transfer==0.19.3 jmespath==1.1.0
+COPY backend/app/ /app/backend/app/
+COPY backend/db/ /app/backend/db/
+COPY backend/scripts/ /app/backend/scripts/
+COPY backend/scripts/ /app/scripts/
+COPY backend/pyproject.toml backend/uv.lock /app/
+COPY backend/pyproject.toml backend/uv.lock /app/backend/

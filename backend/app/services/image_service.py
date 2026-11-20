@@ -28,7 +28,11 @@ from app.services.thumbnail_state_service import (
     safe_record_thumbnail_state_sync,
     thumbnail_state_service,
 )
-from app.services.visual_asset_cache import cache_visual_asset, get_durable_visual_asset
+from app.services.visual_asset_cache import (
+    cache_visual_asset,
+    get_durable_visual_asset,
+    has_durable_visual_asset,
+)
 
 # Load environment variables from .env file
 try:
@@ -793,7 +797,7 @@ class ImageService:
                 return True
         except Exception as e:
             self.logger.error(f"Error checking cached image: {e}")
-        return get_durable_visual_asset(image_hash) is not None
+        return has_durable_visual_asset(image_hash)
 
     def _candidate_cached_thumbnail_hash_sync(self, source_url: str) -> Optional[str]:
         """Return the immutable thumbnail hash for a cached source URL, if known."""
@@ -1142,14 +1146,15 @@ class ImageService:
         durable = await asyncio.to_thread(get_durable_visual_asset, image_hash)
         if durable:
             image_bytes, content_type = durable
-            await asyncio.to_thread(cache_visual_asset, self.image_cache, image_key, image_bytes)
-            await asyncio.to_thread(
-                cache_visual_asset,
-                self.image_cache,
-                f"image_type:{image_hash}",
-                content_type,
-            )
-            self.logger.debug(f"Rehydrated cached image {image_hash} from durable store")
+            try:
+                await asyncio.to_thread(
+                    cache_visual_asset, self.image_cache, image_key, image_bytes
+                )
+                await asyncio.to_thread(
+                    cache_visual_asset, self.image_cache, f"image_type:{image_hash}", content_type
+                )
+            except Exception as exc:
+                self.logger.warning("Optional Redis image hydration failed: %s", type(exc).__name__)
             return image_bytes
         return None
 
@@ -1162,7 +1167,7 @@ class ImageService:
                 return True
         except Exception as e:
             self.logger.error(f"Error checking cached image: {e}")
-        return await asyncio.to_thread(get_durable_visual_asset, image_hash) is not None
+        return await asyncio.to_thread(has_durable_visual_asset, image_hash)
 
     def is_pmtiles_skip_cached(self, image_hash: str) -> bool:
         """

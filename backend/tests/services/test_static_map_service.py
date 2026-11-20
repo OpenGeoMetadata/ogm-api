@@ -50,7 +50,9 @@ def test_materialize_asset_persists_resource_link():
     with (
         patch.object(service, "set_asset_hash_sync") as mock_set_hash,
         patch("app.services.static_map_service.store_durable_visual_asset"),
-        patch("app.services.static_map_service.store_durable_visual_asset_link") as mock_link,
+        patch(
+            "app.services.static_map_service.store_durable_visual_asset_link", return_value=True
+        ) as mock_link,
     ):
         asset_hash = service.materialize_asset_sync(
             "resource-1",

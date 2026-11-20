@@ -135,6 +135,10 @@ def _prime_static_maps_sync(
     *,
     hydrate_assets: bool = True,
 ) -> tuple[str, str]:
+    from app.services.native_static_maps import pregenerate_thumbnail, renderer_url
+
+    if renderer_url():
+        pregenerate_thumbnail(resource_id, geometry, hydrate_asset=hydrate_assets)
     service = StaticMapService()
     source_signature = service.geometry_signature(geometry)
     static_map_variant = service.geometry_variant()

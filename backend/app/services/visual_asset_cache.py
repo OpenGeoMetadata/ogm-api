@@ -3,9 +3,15 @@ import os
 import time
 from typing import Any, Callable, TypeVar
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.services.visual_asset_object_store import (
+    public_visual_asset_url,
+    read_visual_asset,
+    s3_visual_assets_enabled,
+    upload_visual_asset,
+)
 from db.models import generated_visual_asset_links, generated_visual_assets
 from db.session import sync_engine as app_sync_engine
 
@@ -14,13 +20,14 @@ T = TypeVar("T")
 
 
 def visual_asset_ttl_seconds() -> int:
-    """TTL for generated thumbnail/static-map bytes.
+    """Bound hot-cache retention in object-storage mode; preserve legacy defaults."""
+    default = "86400" if s3_visual_assets_enabled() else "0"
+    return int(os.getenv("VISUAL_ASSET_CACHE_TTL_SECONDS", default))
 
-    A value <= 0 stores visual assets without Redis expiry. These assets are
-    content-addressed or source-signature addressed, so routine TTL eviction is
-    counterproductive once the priming tasks have made them hot.
-    """
-    return int(os.getenv("VISUAL_ASSET_CACHE_TTL_SECONDS", "0"))
+
+def redis_visual_body_cache_enabled() -> bool:
+    default = "false" if s3_visual_assets_enabled() else "true"
+    return os.getenv("VISUAL_ASSET_REDIS_BODY_CACHE_ENABLED", default).lower() == "true"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -85,6 +92,10 @@ def redis_operation_with_loading_retry(
 
 
 def cache_visual_asset(cache: Any, key: str, value: bytes | str) -> bool:
+    # A disabled optional binary cache is a successful no-op, including renderer callers.
+    # Alias strings still receive a finite TTL in S3 mode.
+    if isinstance(value, bytes) and not redis_visual_body_cache_enabled():
+        return True
     ttl = visual_asset_ttl_seconds()
     if ttl > 0:
         return bool(
@@ -102,7 +113,7 @@ def cache_visual_asset(cache: Any, key: str, value: bytes | str) -> bool:
 
 
 def durable_visual_asset_enabled() -> bool:
-    return os.getenv("VISUAL_ASSET_DURABLE_STORE", "database").lower() == "database"
+    return os.getenv("VISUAL_ASSET_DURABLE_STORE", "database").lower() in {"database", "s3", "r2"}
 
 
 def _sync_engine():
@@ -126,6 +137,21 @@ def store_durable_visual_asset(
         "body": body,
         "byte_size": len(body),
     }
+    if s3_visual_assets_enabled():
+        try:
+            key, digest = upload_visual_asset(body, content_type)
+        except Exception as exc:
+            logger.warning(
+                "Visual asset upload failed for %s: %s", asset_hash[:12], type(exc).__name__
+            )
+            return False
+        values.update(object_key=key, object_sha256=digest)
+        # Dual-write is the default for a reversible pilot. Disabling it affects NEW writes only.
+        if os.getenv("VISUAL_ASSET_S3_RETAIN_DATABASE_BODY", "true").lower() != "true":
+            values["body"] = None
+    else:
+        # Database-only writes must never retain a stale pointer to previous bytes.
+        values.update(object_key=None, object_sha256=None)
     stmt = pg_insert(generated_visual_assets).values(**values)
     stmt = stmt.on_conflict_do_update(
         index_elements=[generated_visual_assets.c.asset_hash],
@@ -134,6 +160,8 @@ def store_durable_visual_asset(
             "content_type": stmt.excluded.content_type,
             "body": stmt.excluded.body,
             "byte_size": stmt.excluded.byte_size,
+            "object_key": stmt.excluded.object_key,
+            "object_sha256": stmt.excluded.object_sha256,
         },
     )
     try:
@@ -211,20 +239,91 @@ def get_durable_visual_asset_hash_for_resource(
     return str(row._mapping["asset_hash"])
 
 
+def _visual_asset_metadata(asset_hash: str):
+    if not durable_visual_asset_enabled() or not asset_hash:
+        return None
+    stmt = select(
+        generated_visual_assets.c.content_type,
+        generated_visual_assets.c.byte_size,
+        generated_visual_assets.c.object_key,
+        generated_visual_assets.c.object_sha256,
+        generated_visual_assets.c.body.is_not(None).label("has_body"),
+    ).where(generated_visual_assets.c.asset_hash == asset_hash)
+    with _sync_engine().connect() as conn:
+        return conn.execute(stmt).mappings().first()
+
+
+def get_visual_asset_public_url(asset_hash: str) -> str | None:
+    """Only expose a CDN URL after the upload and database pointer have committed."""
+    if not s3_visual_assets_enabled():
+        return None
+    try:
+        row = _visual_asset_metadata(asset_hash)
+        if row and row["object_key"] and row["object_sha256"]:
+            return public_visual_asset_url(row["object_key"])
+    except Exception as exc:
+        logger.warning("Unable to resolve visual asset URL: %s", type(exc).__name__)
+    return None
+
+
+def has_durable_visual_asset(asset_hash: str) -> bool:
+    """Check committed metadata without downloading an image on every alias lookup."""
+    if not durable_visual_asset_enabled() or not asset_hash:
+        return False
+    stmt = select(generated_visual_assets.c.asset_hash).where(
+        generated_visual_assets.c.asset_hash == asset_hash,
+        or_(
+            generated_visual_assets.c.body.is_not(None),
+            generated_visual_assets.c.object_key.is_not(None)
+            & generated_visual_assets.c.object_sha256.is_not(None),
+        ),
+    )
+    try:
+        with _sync_engine().connect() as conn:
+            return conn.execute(stmt).first() is not None
+    except Exception as exc:
+        logger.warning("Unable to check durable visual asset: %s", type(exc).__name__)
+        return False
+
+
 def get_durable_visual_asset(asset_hash: str) -> tuple[bytes, str] | None:
     if not durable_visual_asset_enabled() or not asset_hash:
         return None
-
-    stmt = select(
-        generated_visual_assets.c.body,
-        generated_visual_assets.c.content_type,
-    ).where(generated_visual_assets.c.asset_hash == asset_hash)
     try:
+        row = _visual_asset_metadata(asset_hash)
+        if not row:
+            return None
+        if row["object_key"] and row["object_sha256"]:
+            try:
+                body = read_visual_asset(row["object_key"], row["object_sha256"], row["byte_size"])
+                return body, str(row["content_type"])
+            except Exception as exc:
+                logger.warning("Object read failed; trying database body: %s", type(exc).__name__)
+        stmt = select(generated_visual_assets.c.body, generated_visual_assets.c.content_type).where(
+            generated_visual_assets.c.asset_hash == asset_hash
+        )
         with _sync_engine().connect() as conn:
-            row = conn.execute(stmt).fetchone()
+            local = conn.execute(stmt).mappings().first()
+        if local and local["body"]:
+            return bytes(local["body"]), str(local["content_type"])
     except Exception as exc:
-        logger.warning("Failed to load durable visual asset %s: %s", asset_hash[:12], exc)
+        logger.warning("Failed to load visual asset %s: %s", asset_hash[:12], type(exc).__name__)
+    return None
+
+
+def get_durable_visual_asset_hash_for_signature(
+    asset_kind: str, source_signature: str
+) -> str | None:
+    """Find reusable render bytes without tying identity to a catalog record."""
+    if not durable_visual_asset_enabled() or not source_signature:
         return None
-    if not row:
-        return None
-    return (bytes(row._mapping["body"]), str(row._mapping["content_type"]))
+    stmt = (
+        select(generated_visual_asset_links.c.asset_hash)
+        .where(
+            generated_visual_asset_links.c.asset_kind == asset_kind,
+            generated_visual_asset_links.c.source_signature == source_signature,
+        )
+        .limit(1)
+    )
+    with _sync_engine().connect() as conn:
+        return conn.execute(stmt).scalar_one_or_none()

@@ -34,6 +34,10 @@ async def generate_map_for_resource(resource_id: str, geometry: Any) -> bool:
         bool: True if the map was generated successfully, False otherwise
     """
     try:
+        from app.services.native_static_maps import pregenerate_thumbnail, renderer_url
+
+        if renderer_url():
+            await asyncio.to_thread(pregenerate_thumbnail, resource_id, geometry)
         service = StaticMapService()
         source_signature = service.geometry_signature(geometry)
 
@@ -267,3 +271,65 @@ async def _generate_static_maps_collection_async() -> dict:
 
     finally:
         await task_engine.dispose()
+
+
+@shared_task(bind=True, name="generate_campus_static_map", max_retries=3)
+def generate_campus_static_map(self, map_id, latitude, longitude, zoom, lock_key):
+    """Generate a campus PNG outside the web request; retry remote service failures."""
+    service = StaticMapService(map_width=640, map_height=320)
+    try:
+        data = service.generate_centered_basemap(
+            f"institution:{map_id}", latitude=latitude, longitude=longitude, zoom=zoom
+        )
+        if not data:
+            raise RuntimeError("Campus renderer returned no image")
+        service.map_cache.delete(lock_key)
+        return {"success": True, "sha256": service._asset_hash(data)}
+    except Exception as exc:
+        if self.request.retries >= self.max_retries:
+            service.map_cache.delete(lock_key)
+        raise self.retry(exc=exc, countdown=5 * (self.request.retries + 1)) from exc
+
+
+@shared_task(bind=True, name="generate_native_resource_map", max_retries=3)
+def generate_native_resource_map(self, resource_id, geometry, lock_key, width=800, height=600):
+    """Queue native geography for HTTP cache misses without serving legacy images."""
+    from app.services.native_static_maps import renderer_url
+
+    service = StaticMapService(width, height)
+    try:
+        if not renderer_url():
+            raise RuntimeError("Native renderer is not configured")
+        data = service.generate_map(resource_id, geometry)
+        if not data:
+            raise RuntimeError("Native renderer returned no image")
+        service.map_cache.delete(lock_key)
+        return {"success": True, "sha256": service._asset_hash(data)}
+    except Exception as exc:
+        if self.request.retries >= self.max_retries:
+            service.map_cache.delete(lock_key)
+        raise self.retry(exc=exc, countdown=5 * (self.request.retries + 1)) from exc
+
+
+@shared_task(bind=True, name="pregenerate_native_thumbnails", max_retries=3)
+def pregenerate_native_thumbnails(self, resource_ids):
+    """Bounded, repeatable catalog backfill. Existing renders are linked/reused."""
+    from app.services.native_static_maps import pregenerate_thumbnail, renderer_url
+    from db.session import sync_engine
+
+    if not renderer_url():
+        raise RuntimeError("Native renderer is not configured")
+    if len(resource_ids) > 100:
+        raise ValueError("Submit at most 100 records per batch")
+    with sync_engine.connect() as conn:
+        rows = conn.execute(
+            select(resources.c.id, resources.c.locn_geometry, resources.c.dcat_bbox).where(
+                resources.c.id.in_(resource_ids)
+            )
+        ).fetchall()
+    try:
+        for row in rows:
+            pregenerate_thumbnail(row.id, row.locn_geometry or row.dcat_bbox)
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=5 * (self.request.retries + 1)) from exc
+    return {"prepared": len(rows), "missing": len(set(resource_ids)) - len(rows)}

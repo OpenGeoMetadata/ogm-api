@@ -168,3 +168,25 @@ async def test_run_refuses_full_corpus_redis_asset_hydration():
 
     with patch.object(prime_static_map_cache, "_count_resources", return_value=1000):
         assert await prime_static_map_cache._run(args) == 2
+
+
+def test_native_thumbnail_is_prepared_even_when_full_maps_are_cached():
+    service = MagicMock()
+    service.materialize_cached_variant_sync.return_value = "cached-hash"
+    with (
+        patch.object(prime_static_map_cache, "StaticMapService", return_value=service),
+        patch("app.services.native_static_maps.renderer_url", return_value="http://renderer"),
+        patch("app.services.native_static_maps.pregenerate_thumbnail") as prepare,
+    ):
+        status, _ = prime_static_map_cache._prime_static_maps_sync(
+            "resource-1",
+            "ENVELOPE(-1, 1, 1, -1)",
+            force=False,
+            hydrate_assets=False,
+        )
+    assert status == "cached"
+    prepare.assert_called_once_with(
+        "resource-1",
+        "ENVELOPE(-1, 1, 1, -1)",
+        hydrate_asset=False,
+    )

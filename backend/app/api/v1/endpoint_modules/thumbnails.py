@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -15,6 +16,7 @@ from app.services.cache_service import (
 )
 from app.services.image_service import ImageService
 from app.services.thumbnail_alias_service import is_thumbnail_hash
+from app.services.visual_asset_cache import get_visual_asset_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +156,14 @@ async def get_thumbnail(resource_id: str, request: Request):
         redirect = await _get_resource_alias_redirect(resource_id)
         if redirect is not None:
             return redirect
+
+    if is_thumbnail_hash(resource_id):
+        url = await asyncio.to_thread(get_visual_asset_public_url, resource_id)
+        if url:
+            # Legacy thumbnail hashes describe sources, so keep the mapping redirect short-lived.
+            return Response(
+                status_code=302, headers={"Location": url, "Cache-Control": "public, max-age=300"}
+            )
 
     try:
         # Create service without resource (we only need cache access)

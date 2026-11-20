@@ -355,8 +355,10 @@ generated_visual_assets = Table(
     Column("asset_hash", String(64), primary_key=True),
     Column("asset_kind", String(64), nullable=False, index=True),
     Column("content_type", String(255), nullable=False),
-    Column("body", LargeBinary, nullable=False),
+    Column("body", LargeBinary, nullable=True),
     Column("byte_size", Integer, nullable=False),
+    Column("object_key", String(1024), nullable=True),
+    Column("object_sha256", String(64), nullable=True),
     Column("created_at", TIMESTAMP, nullable=False, server_default=func.now()),
     Column("updated_at", TIMESTAMP, nullable=False, server_default=func.now()),
 )

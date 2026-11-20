@@ -23,10 +23,13 @@ from PIL import Image
 from shapely import wkt as shapely_wkt
 from shapely.geometry import shape
 
+from app.services import native_static_maps
 from app.services.visual_asset_cache import (
     cache_visual_asset,
+    durable_visual_asset_enabled,
     get_durable_visual_asset,
     get_durable_visual_asset_hash_for_resource,
+    has_durable_visual_asset,
     redis_operation_with_loading_retry,
     store_durable_visual_asset,
     store_durable_visual_asset_link,
@@ -83,6 +86,9 @@ class StaticMapService:
             map_width: Width of generated maps in pixels (default: 800)
             map_height: Height of generated maps in pixels (default: 600)
         """
+        if native_static_maps.renderer_url():
+            self._MAP_VARIANT = "native_geometry_v1"
+            self._BASEMAP_VARIANT = "native_basemap_v1"
         self.map_width = map_width
         self.map_height = map_height
 
@@ -491,7 +497,14 @@ class StaticMapService:
                     separators=(",", ":"),
                     default=str,
                 )
-        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return (
+            native_static_maps.signature(
+                [normalized, self.map_width, self.map_height]
+                + (["compact-credits-v1"] if self.map_width < 500 else [])
+            )
+            if native_static_maps.renderer_url()
+            else hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        )
 
     def centered_basemap_signature(self, *, latitude: float, longitude: float, zoom: int) -> str:
         """Return a stable content signature for a campus-centered basemap request."""
@@ -504,7 +517,11 @@ class StaticMapService:
             sort_keys=True,
             separators=(",", ":"),
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return (
+            native_static_maps.signature([payload, self.map_width, self.map_height])
+            if native_static_maps.renderer_url()
+            else hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        )
 
     def external_static_map_url(
         self,
@@ -585,6 +602,12 @@ class StaticMapService:
             return cleaned
         return None
 
+    @staticmethod
+    def campus_asset_hash(resource_id: str, variant: str, source_signature: str | None) -> str:
+        """Stable campus camera identity without a resource-table foreign key."""
+        value = json.dumps([resource_id, variant, source_signature], separators=(",", ":"))
+        return hashlib.sha256(value.encode()).hexdigest()
+
     def get_asset_hash_sync(
         self,
         resource_id: str,
@@ -600,6 +623,10 @@ class StaticMapService:
         )
         if hot_hash:
             return hot_hash
+
+        if resource_id.startswith("institution:"):
+            identity = self.campus_asset_hash(resource_id, variant, source_signature)
+            return identity if has_durable_visual_asset(identity) else None
 
         value = get_durable_visual_asset_hash_for_resource(
             resource_id,
@@ -769,20 +796,19 @@ class StaticMapService:
         )
 
     def has_cached_asset_sync(self, map_hash: str) -> bool:
-        if not self.map_cache or not self._is_asset_hash(map_hash):
+        if not self._is_asset_hash(map_hash):
             return False
-
-        try:
-            asset_key = self._asset_key(map_hash)
-            return bool(
-                redis_operation_with_loading_retry(
+        if self.map_cache:
+            try:
+                asset_key = self._asset_key(map_hash)
+                if redis_operation_with_loading_retry(
                     lambda: self.map_cache.exists(asset_key),
                     operation_name=f"check static map asset {asset_key}",
-                )
-            )
-        except Exception as e:
-            logger.error(f"Error checking cached static map asset {map_hash}: {e}")
-            return False
+                ):
+                    return True
+            except Exception as exc:
+                logger.warning("Redis asset check failed: %s", type(exc).__name__)
+        return has_durable_visual_asset(map_hash)
 
     async def has_cached_asset(self, map_hash: str) -> bool:
         return await asyncio.to_thread(self.has_cached_asset_sync, map_hash)
@@ -835,28 +861,39 @@ class StaticMapService:
         if not map_bytes:
             return None
 
-        map_hash = self._asset_hash(map_bytes)
-        if hydrate_asset:
-            self.cache_asset_sync(map_hash, map_bytes)
-        store_durable_visual_asset(
+        is_campus = resource_id.startswith("institution:")
+        map_hash = (
+            self.campus_asset_hash(resource_id, variant, source_signature)
+            if is_campus
+            else self._asset_hash(map_bytes)
+        )
+        stored = store_durable_visual_asset(
             map_hash,
             asset_kind=variant,
             content_type=self._asset_content_type(map_bytes),
             body=map_bytes,
         )
-        store_durable_visual_asset_link(
-            resource_id,
-            asset_hash=map_hash,
-            asset_kind=variant,
-            source_signature=source_signature,
-        )
-        if source_signature:
-            store_durable_visual_asset_link(
+        if durable_visual_asset_enabled() and not stored:
+            return None
+        if stored and not is_campus:
+            if not store_durable_visual_asset_link(
+                resource_id,
+                asset_hash=map_hash,
+                asset_kind=variant,
+                source_signature=source_signature,
+            ):
+                return None
+            if source_signature and not store_durable_visual_asset_link(
                 resource_id,
                 asset_hash=map_hash,
                 asset_kind=variant,
                 source_signature=None,
-            )
+            ):
+                return None
+        if hydrate_asset:
+            cached = self.cache_asset_sync(map_hash, map_bytes)
+            if not stored and not cached:
+                return None
         self.set_asset_hash_sync(
             resource_id,
             variant=variant,
@@ -1279,6 +1316,16 @@ class StaticMapService:
         Returns:
             PNG image bytes if successful, None if generation failed
         """
+        if native_static_maps.renderer_url():
+            return native_static_maps.generate(
+                self,
+                resource_id,
+                geometry,
+                overlay=True,
+                source_signature=source_signature,
+                hydrate_asset=hydrate_asset,
+            )
+
         try:
             # Parse bbox for skip-global check and for fallback rectangle
             bbox_coords = self._parse_geometry_to_bbox(geometry)
@@ -1383,6 +1430,16 @@ class StaticMapService:
         Generate a world-view static map (no bbox) for resources with no geometry.
         Uses the same tile layer and cache key as generate_map.
         """
+        if native_static_maps.renderer_url():
+            return native_static_maps.generate(
+                self,
+                resource_id,
+                None,
+                overlay=True,
+                source_signature=source_signature,
+                hydrate_asset=hydrate_asset,
+            )
+
         try:
             context = self._global_map_context()
             return self._render_and_cache(
@@ -1413,6 +1470,16 @@ class StaticMapService:
         """
         Generate a basemap-only image using the resource extent with no visible geometry overlay.
         """
+        if native_static_maps.renderer_url():
+            return native_static_maps.generate(
+                self,
+                resource_id,
+                geometry,
+                overlay=False,
+                source_signature=source_signature,
+                hydrate_asset=hydrate_asset,
+            )
+
         try:
             bbox_coords = self._parse_geometry_to_bbox(geometry)
             if not bbox_coords:
@@ -1496,6 +1563,16 @@ class StaticMapService:
         hydrate_asset: bool = True,
     ) -> Optional[bytes]:
         """Generate a world-view basemap image with no geometry overlay."""
+        if native_static_maps.renderer_url():
+            return native_static_maps.generate(
+                self,
+                resource_id,
+                None,
+                overlay=False,
+                source_signature=source_signature,
+                hydrate_asset=hydrate_asset,
+            )
+
         try:
             context = self._global_map_context()
             return self._render_and_cache(
@@ -1524,6 +1601,19 @@ class StaticMapService:
         source_signature: str | None = None,
     ) -> Optional[bytes]:
         """Generate a basemap centered on a specific lat/lon at a fixed zoom."""
+        if native_static_maps.renderer_url():
+            return native_static_maps.generate(
+                self,
+                resource_id,
+                overlay=False,
+                center=[longitude, latitude],
+                zoom=zoom,
+                source_signature=source_signature
+                or self.centered_basemap_signature(
+                    latitude=latitude, longitude=longitude, zoom=zoom
+                ),
+            )
+
         try:
             if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
                 logger.warning(
