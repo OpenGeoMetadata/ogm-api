@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "15 7 * * *"
   workflow_dispatch:
+    inputs:
+      madison_only:
+        description: Run only the UW–Madison API harvest
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,8 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
+    env:
+      SSH_HOST: ${{ secrets.OGM_KAMAL_SSH_HOST }}
+      SSH_PORT: ${{ secrets.OGM_KAMAL_SSH_PORT || '22' }}
+      SSH_USER: ${{ secrets.OGM_KAMAL_SSH_USER }}
+
     steps:
-      - name: Check out preflight script
+      - name: Check out OGM sync scripts
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Start SSH agent
@@ -28,29 +38,19 @@ jobs:
           ssh-private-key: ${{ secrets.OGM_KAMAL_SSH_PRIVATE_KEY }}
 
       - name: Trust production host key
-        env:
-          SSH_HOST: ${{ secrets.OGM_KAMAL_SSH_HOST }}
-          SSH_PORT: ${{ secrets.OGM_KAMAL_SSH_PORT || '22' }}
         run: |
           mkdir -p "$HOME/.ssh"
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> "$HOME/.ssh/known_hosts"
 
       - name: Verify production disk reserve and Elasticsearch write readiness
-        env:
-          SSH_HOST: ${{ secrets.OGM_KAMAL_SSH_HOST }}
-          SSH_PORT: ${{ secrets.OGM_KAMAL_SSH_PORT || '22' }}
-          SSH_USER: ${{ secrets.OGM_KAMAL_SSH_USER }}
         run: |
           ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
             'python3 - --min-free-percent 15' < backend/scripts/check_ogm_sync_capacity.py
 
-      - name: Refresh repositories, harvest, and verify indexing
-        env:
-          SSH_HOST: ${{ secrets.OGM_KAMAL_SSH_HOST }}
-          SSH_PORT: ${{ secrets.OGM_KAMAL_SSH_PORT || '22' }}
-          SSH_USER: ${{ secrets.OGM_KAMAL_SSH_USER }}
+      - name: Locate production application container
+        id: app
         run: |
-          ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" '
+          container=$(ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" '
             set -eu
 
             container="$(docker ps \
@@ -74,6 +74,22 @@ jobs:
               exit 1
             fi
 
-            echo "Using container: $container"
-            docker exec "$container" python /app/backend/scripts/trigger_ogm_nightly_sync.py --wait
-          '
+            echo "$container"
+          ')
+          [[ "$container" =~ ^[a-zA-Z0-9_.-]+$ ]]
+          echo "container=$container" >> "$GITHUB_OUTPUT"
+
+      - name: Harvest UW–Madison from BTAA and verify OGM indexing
+        env:
+          CONTAINER: ${{ steps.app.outputs.container }}
+        run: |
+          ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "docker exec -i -w /app/backend '$CONTAINER' python -u -" < backend/scripts/sync_uwmadison.py
+
+      - name: Refresh repositories, harvest, and verify indexing
+        if: ${{ !cancelled() && steps.app.outcome == 'success' && !inputs.madison_only }}
+        env:
+          CONTAINER: ${{ steps.app.outputs.container }}
+        run: |
+          ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "docker exec '$CONTAINER' python /app/backend/scripts/trigger_ogm_nightly_sync.py --wait"

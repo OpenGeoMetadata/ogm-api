@@ -291,14 +291,14 @@ This will:
 
 ### Manually Trigger the Nightly OGM Sync
 
-If you need to run the nightly OGM pipeline outside its normal schedule:
+The full production workflow runs both the Madison API harvest and the GitHub
+repository harvests. To run it immediately or retry only Madison, use:
 
 ```bash
-kamal app exec "python /app/backend/scripts/trigger_ogm_nightly_sync.py"
+gh workflow run ogm-nightly-sync.yml --ref develop
+# Madison only
+gh workflow run ogm-nightly-sync.yml --ref develop -f madison_only=true
 ```
-
-That command refreshes the discovered OpenGeoMetadata repository list and enqueues
-the scheduled OGM harvest tasks for enabled repos.
 
 ### Prime Generated Caches
 
@@ -814,6 +814,16 @@ succeeds after every child harvest reports zero import errors and a completed
 search synchronization with zero indexing errors. Failures and a five-hour wait
 timeout fail the workflow. The existing concurrency group prevents overlapping
 workflow runs while their harvests are being monitored.
+
+The same workflow fetches the public BTAA Geospatial API with the exact
+`schema_provider_s` filter `University of Wisconsin-Madison`. It splits queries
+that exceed BTAA's search window and verifies stable counts, unique IDs, and
+campus membership before importing. New and updated records keep their BTAA IDs
+and the OGM source tag `btaa-api.uwmadison`. The importer tracks records absent
+from a complete snapshot without deleting them. Each run reindexes the Madison
+source and records its outcome in OGM harvest history. The Wisconsin discovery
+template continues to read from the OGM API. The source stays disabled in
+GitHub discovery because the workflow reads its records over HTTP.
 
 Before queueing a harvest, CI streams `backend/scripts/check_ogm_sync_capacity.py`
 to the host's Python 3 interpreter. This read-only check requires at least 15%
