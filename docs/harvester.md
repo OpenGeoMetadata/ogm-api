@@ -65,7 +65,8 @@ The harvester denylist automatically excludes non-metadata repositories such as 
 ## Related Backend Flows
 
 Application discovery and harvesting share explicit metadata locations. Most
-repositories use `metadata-aardvark/`; `ca.lunaris` uses the repository root with
+repositories use `metadata-aardvark/`. Harvard (`edu.harvard`) publishes its discovery
+records under `ogm-aardvark/`. Lunaris (`ca.lunaris`) uses the repository root with
 records nested under provider directories. For that root layout, the reader
 accepts only records declaring `gbl_mdVersion_s: Aardvark` and skips hidden paths
 and `layers.json`. After deploying this support, the next repository discovery
